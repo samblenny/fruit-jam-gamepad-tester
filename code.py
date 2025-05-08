@@ -14,8 +14,10 @@ import usb_host
 
 import adafruit_imageload
 from gamepad import (
-    XInputGamepad, UP, DOWN, LEFT, RIGHT, START, SELECT, L, R, A, B, X, Y)
+    Gamepad, UP, DOWN, LEFT, RIGHT, START, SELECT, L, R, A, B, X, Y)
 
+
+DEBUG = True
 
 def update_GUI(scene, prev, buttons):
     # Update TileGrid sprites to reflect changed state of gamepad buttons
@@ -53,7 +55,8 @@ def update_GUI(scene, prev, buttons):
         scene[4, 3] = 10 if (buttons & SELECT) else 24
     if diff & START:
         scene[5, 3] = 11 if (buttons & START) else 25
-    #print(f"{buttons:016b}")
+    if DEBUG:
+        print(f"\r{buttons:016b}", end='')
 
 
 def main():
@@ -94,7 +97,7 @@ def main():
 
     # MAIN EVENT LOOP
     # Establish and maintain a gamepad connection
-    gp = XInputGamepad()
+    gp = Gamepad(DEBUG)
     print("Looking for USB gamepad...")
     while True:
         gc.collect()
@@ -111,8 +114,9 @@ def main():
                         display.refresh()
                         prev = buttons
                     sleep(0.002)
-                    gc.collect()
                 # If loop stopped, gamepad connection was lost
+                if DEBUG:
+                    print()
                 print("Gamepad disconnected")
                 print("Looking for USB gamepad...")
             else:
@@ -122,6 +126,8 @@ def main():
             # This might mean gamepad was unplugged, or maybe some other
             # low-level USB thing happened which this driver does not yet
             # know how to deal with. So, log the error and keep going
+            if DEBUG:
+                print()
             print(e)
             print("Gamepad connection error")
             print("Looking for USB gamepad...")

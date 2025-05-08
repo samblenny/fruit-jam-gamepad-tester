@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright 2025 Sam Blenny
 #
-# Gamepad driver for XInput compatible USB wired gamepad
+# Gamepad driver for DInput or XInput compatible USB wired gamepads
 #
 # The button names used here match the Nintendo SNES style button
 # cluster layout, but the USB IDs and protocol match the Xbox 360 USB
@@ -29,13 +29,14 @@ A      = 0x2000  # button cluster: right button  (Nintendo A, Xbox B)
 Y      = 0x4000  # button cluster: left button   (Nintendo Y, Xbox X)
 X      = 0x8000  # button cluster: top button    (Nintendo X, Xbox Y)
 
-class XInputGamepad:
-    def __init__(self):
+class Gamepad:
+    def __init__(self, debug):
         # Initialize buffers used in polling USB gamepad events
         self._prev = 0
         self.buf64 = bytearray(64)
         # Variable to hold the gamepad's usb.core.Device object
         self.device = None
+        self.debug = debug
 
     def find_and_configure(self, retries=25):
         # Connect to a USB wired Xbox 360 style gamepad (vid:pid=045e:028e)
@@ -46,16 +47,92 @@ class XInputGamepad:
         # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
         #
         for _ in range(retries):
-            device = core.find(idVendor=0x045e, idProduct=0x028e)
-            if device:
-                sleep(0.1)
-                self._configure(device)  # may raise usb.core.USBError
-                return True              # end retry loop
-            else:
-                sleep(0.1)
+            for device in core.find(find_all=True):
+                if device and device.idVendor != 0:
+                    sleep(0.1)
+                    journal = {}
+                    self.get_device_descriptor(device, journal)
+                    keys_ = sorted(journal)
+                    print('\n'.join([f"{k}: {journal[k]}" for k in keys_]))
+                    self._configure(device)  # may raise usb.core.USBError
+                    return True              # end retry loop
+                else:
+                    sleep(0.1)
         # Reaching this point means no matching USB gamepad was found
         self._reset()
         return False
+
+    def get_config_descriptor(self, device, config_num, journal):
+        # Read USB device descriptor which is always 18 bytes
+        data = bytearray(256)
+        config_len = device.ctrl_transfer(0x80, 6, 2 << 8, 0, data, 500)
+        # NOTE: Value of config_len seems to always be len(data). Not useful.
+        print(f"Configuration {config_num}:")
+        # Loop over the configuration descriptor bytes, splitting them into
+        # slices for each sub-descriptor. First byte of each slice is a byte
+        # length for that sub-descriptor.
+        cursor = 0
+        limit = len(data)
+        for i in range(limit):
+            if cursor == limit:
+                break
+            length = data[cursor]
+            if length == 0:
+                break
+            if cursor + length > limit:
+                print(f"Invalid descriptor length: data[{i}] = {length}")
+                return False
+            descriptor = data[cursor:cursor+length]
+            print(' '.join(['%02x' % b for b in descriptor]))
+            cursor += length
+            # parse the descriptor
+            if len(descriptor) < 2:
+                continue
+            desc_type = descriptor[1]
+            if desc_type == 0x02:
+                self.parse_desc_config(journal, descriptor)
+            elif desc_type == 0x04:
+                self.parse_desc_interface(journal, descriptor)
+        return True
+
+    def parse_desc_config(self, journal, data):
+        if len(data) != 9:
+            return False
+        journal['num_interfaces'] = data[4]
+
+    def parse_desc_interface(self, journal, data):
+        if len(data) != 9:
+            return False
+        interfaces = journal.get('interfaces', [])
+        # (interface_number, endpoint_count, subclass)
+        interface_num = data[2]
+        num_endpoints = data[4]
+        subclass = data[6]
+        interfaces.append((interface_num, num_endpoints, subclass))
+        journal['interfaces'] = interfaces
+
+    def get_device_descriptor(self, device, journal):
+        # Read USB device descriptor which is always 18 bytes
+        data = bytearray(18)
+        length = device.ctrl_transfer(0x80, 6, 1 << 8, 0, data, 100)
+        if length != len(data):
+            return False
+        device_class = data[4]
+        max_packet_size = data[7]
+        num_configs = data[17]
+        journal['device_class'] = device_class
+        journal['max_packet_size'] = max_packet_size
+        journal['num_configs'] = num_configs
+        if device_class == 0x00:
+            # For HID device, need to check interface descriptors for more info
+            # This might be a DInput game controller, or maybe something else
+            print(f"device class 0x00: probably a HID device")
+        elif device_class == 0xff:
+            # This could be an XInput gamepad
+            print(f"device class 0xff: vendor specific protocol")
+        for c in range(num_configs):
+            self.get_config_descriptor(device, c, journal)
+        return True
 
     def _configure(self, device):
         # Prepare USB gamepad for use (set configuration, drain buffer, etc)
@@ -70,6 +147,7 @@ class XInputGamepad:
                 device.detach_kernel_driver(interface)
             # Make sure that configuration is set
             device.set_configuration()
+            sleep(0.01)
         except USBError as e:
             print("[E1]: '%s', %s, '%s'" % (e, type(e), e.errno))
             self._reset()
@@ -78,10 +156,14 @@ class XInputGamepad:
         # may raise an exception (with no string description nor errno!)
         # when buffer is already empty. If that happens, ignore it.
         try:
+            if self.debug:
+                print(f"attempting to drain old reports from buffer...")
             sleep(0.1)
             for _ in range(8):
                 __ = device.read(0x81, self.buf64, timeout=timeout_ms)
                 self._prev = 0
+            if self.debug:
+                print(f"   done")
         except USBError as e:
             if e.errno is None:
                 pass  # this is okay
