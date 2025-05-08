@@ -37,6 +37,7 @@ class Gamepad:
         # Variable to hold the gamepad's usb.core.Device object
         self.device = None
         self.debug = debug
+        self.gamepad_type = None
 
     def find_and_configure(self, retries=25):
         # Connect to a USB wired Xbox 360 style gamepad (vid:pid=045e:028e)
@@ -50,23 +51,83 @@ class Gamepad:
             for device in core.find(find_all=True):
                 if device and device.idVendor != 0:
                     sleep(0.1)
+                    # Read device and configuration descriptors to find details
+                    # to help identify DInput or XInput gamepads
                     journal = {}
                     self.get_device_descriptor(device, journal)
                     keys_ = sorted(journal)
                     print('\n'.join([f"{k}: {journal[k]}" for k in keys_]))
-                    self._configure(device)  # may raise usb.core.USBError
-                    return True              # end retry loop
+                    # Decide whether to skip or claim this device
+                    if self.is_xinput_gamepad(journal):
+                        # may raise usb.core.USBError
+                        self._configure(device, 'XInput')
+                        # end retry loop
+                        return True
+                    elif self.is_dinput_gamepad(journal):
+                        # may raise usb.core.USBError
+                        self._configure(device, 'DInput')
+                        # end retry loop
+                        return True
                 else:
                     sleep(0.1)
         # Reaching this point means no matching USB gamepad was found
         self._reset()
         return False
 
-    def get_config_descriptor(self, device, config_num, journal):
-        # Read USB device descriptor which is always 18 bytes
+    def is_xinput_gamepad(self, journal):
+        # Check descriptor details for pattern matching XInput gamepad
+        if journal['device_class'] != 0xff:
+            return False
+        if journal['num_interfaces'] != 4:
+            return False
+        subclass_match = False
+        interfaces = journal.get('interfaces', [])
+        for i in interfaces:
+            if i['interface_num'] == 0:
+                if i['class'] == '0xff' and i['subclass'] == '0x5d':
+                    subclass_match = True
+        if not subclass_match:
+            return False
+        endpoint_match = False
+        endpoints = journal.get('endpoints', [])
+        for e in endpoints:
+            if e['addr'] == '0x81' and e['attrs'] == 3:
+                endpoint_match = True
+        return endpoint_match
+
+    def is_dinput_gamepad(self, journal):
+        # Check descriptor details for pattern matching DInput gamepad
+        if journal['device_class'] != 0x00:
+            return False
+        subclass_match = False
+        interfaces = journal.get('interfaces', [])
+        for i in interfaces:
+            if i['interface_num'] == 0:
+                if i['class'] == '0x03' and i['subclass'] == '0x00':
+                    subclass_match = True
+        if not subclass_match:
+            return False
+        endpoint_match = False
+        endpoints = journal.get('endpoints', [])
+        for e in endpoints:
+            if e['addr'] == '0x81' and e['attrs'] == 3:
+                endpoint_match = True
+        return endpoint_match
+
+
+#     def get_hid_report_descriptor(self, device, journal, length):
+#         # Get HID report descriptor
+#         # Don't attempt to call this prior to set_configuration()
+#         data = bytearray(length)
+#         device.ctrl_transfer(0x81, 6, 0x22 << 8, 0, data, 500)
+#         print(' '.join(['%02x ' % b for b in data]))
+
+
+    def get_config_descriptor(self, device, config_num, journal, dev_class):
+        # Read & parse configuration descriptor (up to 256 bytes)
         data = bytearray(256)
-        config_len = device.ctrl_transfer(0x80, 6, 2 << 8, 0, data, 500)
-        # NOTE: Value of config_len seems to always be len(data). Not useful.
+        device.ctrl_transfer(0x80, 6, 2 << 8, 0, data, 500)
+        # NOTE: return value of ctrl_transfer is not useful (always len(data))
         print(f"Configuration {config_num}:")
         # Loop over the configuration descriptor bytes, splitting them into
         # slices for each sub-descriptor. First byte of each slice is a byte
@@ -85,31 +146,68 @@ class Gamepad:
             descriptor = data[cursor:cursor+length]
             print(' '.join(['%02x' % b for b in descriptor]))
             cursor += length
-            # parse the descriptor
+            # Parse the descriptor
             if len(descriptor) < 2:
                 continue
             desc_type = descriptor[1]
-            if desc_type == 0x02:
-                self.parse_desc_config(journal, descriptor)
-            elif desc_type == 0x04:
+            if length == 9 and desc_type == 0x02:
+                # Parse a type=0x02 chunk of the configuration descriptor
+                journal['num_interfaces'] = data[4]
+            elif length == 9 and desc_type == 0x04:
                 self.parse_desc_interface(journal, descriptor)
+            elif length == 7 and desc_type == 0x05:
+                self.parse_desc_endpoint(journal, descriptor)
+            elif dev_class == 0x00 and length == 9 and desc_type == 0x21:
+                self.parse_desc_hid(journal, descriptor)
         return True
 
-    def parse_desc_config(self, journal, data):
-        if len(data) != 9:
-            return False
-        journal['num_interfaces'] = data[4]
+    def parse_desc_hid(self, journal, data):
+        # Parse a type0x21 (HID) chunk of the configuration descriptor
+        # This should not be called for device class 0xff
+        num_descriptors = data[4]
+        report_type = data[6]
+        report_length = (data[8] << 8) | data[7]
+        hid = journal.get('HID', [])
+        hid.append({
+            'num_descriptors': num_descriptors,
+            'report_type': report_type,
+            'report_length': report_length
+            })
+        journal['HID'] = hid
 
     def parse_desc_interface(self, journal, data):
-        if len(data) != 9:
-            return False
+        # Parse a type=0x04 chunk of the configuration descriptor
         interfaces = journal.get('interfaces', [])
         # (interface_number, endpoint_count, subclass)
         interface_num = data[2]
         num_endpoints = data[4]
+        # class 0x03 is HID game controller
+        class_ = data[5]
         subclass = data[6]
-        interfaces.append((interface_num, num_endpoints, subclass))
+        interfaces.append({
+            'interface_num': interface_num,
+            'num_endpoints': num_endpoints,
+            'class': '0x%02x' % class_,
+            'subclass': '0x%02x' % subclass
+            })
         journal['interfaces'] = interfaces
+
+    def parse_desc_endpoint(self, journal, data):
+        # Parse a type=0x05 chunk of the configuration descriptor
+        # If bit 7 is set (0x80), direction is input
+        addr = data[2]
+        # 3 is interrupt
+        attrs = data[3]
+        max_packet = (data[5] << 8) | data[4]
+        interval_ms = data[6]
+        endpoints = journal.get('endpoints', [])
+        endpoints.append({
+            'addr': '0x%02x' % addr,
+            'attrs': attrs,
+            'max_packet': max_packet,
+            'interval_ms': interval_ms
+            })
+        journal['endpoints'] = endpoints
 
     def get_device_descriptor(self, device, journal):
         # Read USB device descriptor which is always 18 bytes
@@ -131,14 +229,16 @@ class Gamepad:
             # This could be an XInput gamepad
             print(f"device class 0xff: vendor specific protocol")
         for c in range(num_configs):
-            self.get_config_descriptor(device, c, journal)
-        return True
+            self.get_config_descriptor(device, c, journal, device_class)
 
-    def _configure(self, device):
+    def _configure(self, device, gamepad_type):
         # Prepare USB gamepad for use (set configuration, drain buffer, etc)
         #
         # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
         #
+        self.gamepad_type = gamepad_type
+        if self.debug:
+            print(f"Configuring gamepad of type: {gamepad_type}")
         interface = 0
         timeout_ms = 5
         try:
@@ -152,6 +252,10 @@ class Gamepad:
             print("[E1]: '%s', %s, '%s'" % (e, type(e), e.errno))
             self._reset()
             raise e
+        self.device = device
+        if gamepad_type != 'XInput':
+            print("TODO: IMPLEMENT DINPUT SUPPORT")
+            return
         # Initial reads may give old data, so drain gamepad's buffer. This
         # may raise an exception (with no string description nor errno!)
         # when buffer is already empty. If that happens, ignore it.
