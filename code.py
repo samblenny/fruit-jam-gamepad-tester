@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright 2024 Sam Blenny
 #
-from displayio import Bitmap, Group, OnDiskBitmap, Palette, TileGrid
+from board import CKP, CKN, D0P, D0N, D1P, D1N, D2P, D2N
+from displayio import (Bitmap, Group, OnDiskBitmap, Palette, TileGrid,
+    release_displays)
+from framebufferio import FramebufferDisplay
 import gc
+from picodvi import Framebuffer
+import supervisor
 from time import sleep
 from usb.core import USBError
+import usb_host
 
 import adafruit_imageload
 from gamepad import (
@@ -51,14 +57,26 @@ def update_GUI(scene, prev, buttons):
 
 
 def main():
-    gc.collect()
+    # Make sure display is configured for 320x240 8-bit
+    display = supervisor.runtime.display
+    if (display is None) or display.width != 320:
+	print("Re-initializing display for 320x240")
+        release_displays()
+        gc.collect()
+        fb = Framebuffer(320, 240, clk_dp=CKP, clk_dn=CKN,
+            red_dp=D0P, red_dn=D0N, green_dp=D1P, green_dn=D1N,
+            blue_dp=D2P, blue_dn=D2N, color_depth=8)
+        display = FramebufferDisplay(fb)
+        supervisor.runtime.display = display
+    else:
+        print("Using existing display")
 
     # load spritesheet and palette
     (bitmap, palette) = adafruit_imageload.load("sprites.bmp", bitmap=Bitmap,
         palette=Palette)
     # assemble TileGrid with gamepad using sprites from the spritesheet
     scene = TileGrid(bitmap, pixel_shader=palette, width=10, height=5,
-        tile_width=8, tile_height=8, default_tile=9)
+        tile_width=8, tile_height=8, default_tile=9, x=13, y=5)
     tilemap = (
         (0, 5, 2, 3, 3, 3, 3, 4, 5, 6),            # . L . . . . . . R .
         (7, 9, 12, 9, 9, 9, 9, 17, 9, 13),         # . . dU. . . . X . .
