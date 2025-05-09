@@ -14,7 +14,8 @@ import usb_host
 
 import adafruit_imageload
 from gamepad import (
-    Gamepad, UP, DOWN, LEFT, RIGHT, START, SELECT, L, R, A, B, X, Y)
+    find_gamepad_device, Gamepad,
+    UP, DOWN, LEFT, RIGHT, START, SELECT, L, R, A, B, X, Y)
 
 
 DEBUG = True
@@ -58,12 +59,11 @@ def update_GUI(scene, prev, buttons):
     if DEBUG:
         print(f"\r{buttons:016b}", end='')
 
-
 def main():
     # Make sure display is configured for 320x240 8-bit
     display = supervisor.runtime.display
     if (display is None) or display.width != 320:
-	print("Re-initializing display for 320x240")
+        print("Re-initializing display for 320x240")
         release_displays()
         gc.collect()
         fb = Framebuffer(320, 240, clk_dp=CKP, clk_dn=CKN,
@@ -97,14 +97,18 @@ def main():
 
     # MAIN EVENT LOOP
     # Establish and maintain a gamepad connection
-    gp = Gamepad(DEBUG)
     print("Looking for USB gamepad...")
     while True:
         gc.collect()
         try:
-            if gp.find_and_configure(retries=25):
+            (device, gamepad_type) = find_gamepad_device()
+            if device and gamepad_type:
                 # Found a gamepad, so configure it and start polling
-                print(gp.device_info_str())
+                if DEBUG:
+                    print("Found device. Connecting...")
+                gp = Gamepad(device, gamepad_type)
+                if DEBUG:
+                    print("Connected")
                 connected = True
                 prev = 0
                 while connected:
@@ -115,20 +119,16 @@ def main():
                         prev = buttons
                     sleep(0.002)
                 # If loop stopped, gamepad connection was lost
-                if DEBUG:
-                    print()
                 print("Gamepad disconnected")
                 print("Looking for USB gamepad...")
             else:
                 # No connection yet, so sleep briefly then try again
-                sleep(0.1)
+                sleep(1)
         except USBError as e:
             # This might mean gamepad was unplugged, or maybe some other
             # low-level USB thing happened which this driver does not yet
             # know how to deal with. So, log the error and keep going
-            if DEBUG:
-                print()
-            print(e)
+            print("\n", e)
             print("Gamepad connection error")
             print("Looking for USB gamepad...")
 
