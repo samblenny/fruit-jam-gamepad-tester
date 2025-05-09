@@ -33,9 +33,9 @@ sync: bundle
 # in the dialout group or screen won't open the serial port.
 tty:
 	if [ -e /dev/ttyACM0 ]; then \
-		screen -fn /dev/ttyACM0 115200; fi
+		screen -h 9999 -fn /dev/ttyACM0 115200; fi
 	if [ -e /dev/tty.usbmodem* ]; then \
-		screen -fn /dev/tty.usbmodem* 115200; fi
+		screen -h 9999 -fn /dev/tty.usbmodem* 115200; fi
 
 clean:
 	rm -rf build
