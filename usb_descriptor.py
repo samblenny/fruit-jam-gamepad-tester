@@ -78,9 +78,7 @@ class ConfigDesc:
         self.bMaxPower           = d[8]  # units are 2 mA
 
     def __str__(self):
-        fmt = """  Config %d:
-    NumInterfaces: %d
-    MaxPower: %d mA"""
+        fmt = '  Config %d: NumInterfaces: %d, MaxPower: %d mA'
         return fmt % (
             self.bConfigurationValue,
             self.bNumInterfaces,
@@ -100,11 +98,8 @@ class InterfaceDesc:
         self.bInterfaceProtocol = d[7]
 
     def __str__(self):
-        fmt = """  Interface %d:
-    Endpoints: %d
-    Class: 0x%02x
-    SubClass: 0x%02x
-    Protocol: 0x%02x"""
+        fmt = ('  Interface %d: '
+            'Endpoints: %d, Class: 0x%02x, SubClass: 0x%02x, Protocol: 0x%02x')
         return fmt % (
             self.bInterfaceNumber,
             self.bNumEndpoints,
@@ -126,10 +121,8 @@ class EndpointDesc:
         self.bInterval          = d[6]
 
     def __str__(self):
-        fmt = """  Endpoint 0x%02x:
-    bmAttributes: 0x%02x
-    wMaxPacketSize: %d
-    bInterval: %d ms"""
+        fmt = ('  Endpoint 0x%02x: '
+            'bmAttributes: 0x%02x, wMaxPacketSize: %d, bInterval: %d ms')
         return fmt % (
             self.bEndpointAddress,
             self.bmAttributes,
@@ -143,8 +136,7 @@ class HIDSubDesc:
         self.wDescriptorLength = wDL
 
     def __str__(self):
-        fmt = """HID bDescriptorType: 0x%02x:
-  wDescriptorLength: %d"""
+        fmt = '    bDescriptorType: 0x%02x, wDescriptorLength: %d'
         return fmt % (
             self.bDescriptorType,
             self.wDescriptorLength)
