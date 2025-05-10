@@ -1,6 +1,6 @@
 <!-- SPDX-License-Identifier: MIT -->
 <!-- SPDX-FileCopyrightText: Copyright 2025 Sam Blenny -->
-# Fruit Jame Gamepad Tester
+# Fruit Jam Gamepad Tester
 
 **WORK IN PROGRESS**
 
