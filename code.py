@@ -13,12 +13,19 @@ from usb.core import USBError
 import usb_host
 
 import adafruit_imageload
+import adafruit_logging as logging
+
 from gamepad import (
     find_gamepad_device, Gamepad,
     UP, DOWN, LEFT, RIGHT, START, SELECT, L, R, A, B, X, Y)
 
 
-DEBUG = True
+# Configure logging
+logger = logging.getLogger('code.py')
+logger.setLevel(logging.DEBUG)
+
+BUTTON_DEBUG = const(True)
+
 
 def update_GUI(scene, prev, buttons):
     # Update TileGrid sprites to reflect changed state of gamepad buttons
@@ -56,14 +63,16 @@ def update_GUI(scene, prev, buttons):
         scene[4, 3] = 10 if (buttons & SELECT) else 24
     if diff & START:
         scene[5, 3] = 11 if (buttons & START) else 25
-    if DEBUG:
+    if BUTTON_DEBUG:
         print(f"\r{buttons:016b}", end='')
 
 def main():
+    sleep(0.5)
+
     # Make sure display is configured for 320x240 8-bit
     display = supervisor.runtime.display
     if (display is None) or display.width != 320:
-        print("Re-initializing display for 320x240")
+        logger.info("Re-initializing display for 320x240")
         release_displays()
         gc.collect()
         fb = Framebuffer(320, 240, clk_dp=CKP, clk_dn=CKN,
@@ -72,7 +81,8 @@ def main():
         display = FramebufferDisplay(fb)
         supervisor.runtime.display = display
     else:
-        print("Using existing display")
+        logger.info("Using existing display")
+    display.auto_refresh = False
 
     # load spritesheet and palette
     (bitmap, palette) = adafruit_imageload.load("sprites.bmp", bitmap=Bitmap,
@@ -97,18 +107,18 @@ def main():
 
     # MAIN EVENT LOOP
     # Establish and maintain a gamepad connection
-    print("Looking for USB gamepad...")
+    logger.info("Looking for USB gamepad...")
     while True:
         gc.collect()
+        need_LF = False
         try:
             (device, gamepad_type) = find_gamepad_device()
             if device and gamepad_type:
                 # Found a gamepad, so configure it and start polling
-                if DEBUG:
-                    print("Found device. Connecting...")
-                gp = Gamepad(device, gamepad_type)
-                if DEBUG:
-                    print("Connected")
+                logger.info("Found device. Connecting...")
+                player = 1
+                gp = Gamepad(device, gamepad_type, player)
+                logger.debug("Connected")
                 connected = True
                 prev = 0
                 while connected:
@@ -116,11 +126,14 @@ def main():
                     if connected and changed:
                         update_GUI(scene, prev, buttons)
                         display.refresh()
+                        need_LF = True
                         prev = buttons
-                    sleep(0.002)
+                    sleep(0.008)
                 # If loop stopped, gamepad connection was lost
-                print("Gamepad disconnected")
-                print("Looking for USB gamepad...")
+                if need_LF:
+                    print()  # flush line with button bits from update_GUI()
+                    need_LF = False
+                logger.info("Gamepad disconnected. Looking for gamepad...")
             else:
                 # No connection yet, so sleep briefly then try again
                 sleep(1)
@@ -128,9 +141,11 @@ def main():
             # This might mean gamepad was unplugged, or maybe some other
             # low-level USB thing happened which this driver does not yet
             # know how to deal with. So, log the error and keep going
-            print("\n", e)
-            print("Gamepad connection error")
-            print("Looking for USB gamepad...")
+            if need_LF:
+                print()  # flush line with button bits from update_GUI()
+                need_LF = False
+            logger.error("USBError: '%s', %s, '%s'" % (e, type(e), e.errno))
+            logger.info("Gamepad connection error. Looking for gamepad...")
 
 
 main()

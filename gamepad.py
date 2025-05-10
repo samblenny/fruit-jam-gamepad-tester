@@ -10,11 +10,25 @@
 # particular, I tested this package using my 8BitDo SN30 Pro USB wired
 # gamepad.
 #
+# Related docs:
+# - https://docs.circuitpython.org/projects/logging/en/latest/api.html
+# - https://learn.adafruit.com/a-logger-for-circuitpython/overview
+#
 from time import sleep
 from struct import unpack
 from usb import core
 from usb.core import USBError, USBTimeoutError
 from micropython import const
+
+import adafruit_logging as logging
+
+import usb_descriptor
+
+
+# Configure logging
+logger = logging.getLogger('gamepad')
+logger.setLevel(logging.DEBUG)
+
 
 # Gamepad button bitmask constants
 UP     = const(0x0001)  # dpad: Up
@@ -34,166 +48,93 @@ X      = const(0x8000)  # button cluster: top button    (Nintendo X, Xbox Y)
 DINPUT = const(1)
 XINPUT = const(2)
 
-RETRIES = const(25)
-DEBUG = True
+# Configure logging
+logger = logging.getLogger('gamepad')
+logger.setLevel(logging.DEBUG)
+
 
 def find_gamepad_device():
     # Find a USB wired gamepad by inspecting usb device descriptors
-    # Returns: (usb.core.Device, gamepad_type constant) or (None, None)
+    # - return: (usb.core.Device, gamepad_type constant) or (None, None)
     # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
     #
     for device in core.find(find_all=True):
-        if DEBUG:
-            print("Finding gamepad device...")
-        if device:
-            sleep(0.1)
-            # Read device and configuration descriptors to find details
-            # to help identify DInput or XInput gamepads
-            journal = {}
-            try:
-                for i in range(RETRIES):
-                    if get_device_descriptor(device, journal):
-                        break
-                    sleep(0.1)
-            except USBError:
-                # USBError can happen when device first connects
-                print("[E4]")
-                return (None, None)
-            keys_ = sorted(journal)
-            if DEBUG:
-                print('\n'.join([f"{k}: {journal[k]}" for k in keys_]))
-            # Decide whether to ignore or claim this device
-            # This may may raise usb.core.USBError
-            if is_xinput_gamepad(journal):
+        # Read device and configuration descriptors to find details
+        # to help identify DInput or XInput gamepads
+        try:
+            desc = usb_descriptor.Descriptor(device)
+            logger.info(desc)
+            if is_xinput_gamepad(desc):
                 return (device, XINPUT)
-            elif journal.get('Interface 0', None) == 'HID':
-                return (device, DINPUT)
-            else:
-                print
-        else:
-            sleep(0.5)
-    # Reaching this point means no matching USB gamepad was found
+        except ValueError as e:
+            # This happens for errors during descriptor parsing
+            logger.error(e)
+            pass
+        except USBError as e:
+            # USBError can happen when device first connects
+            logger.error("USBError: '%s', %s, '%s'" % (e, type(e), e.errno))
+            pass
     return (None, None)
 
-def is_xinput_gamepad(journal):
-    # Check descriptor details for pattern matching XInput gamepad
-    if journal.get('num_interfaces', None) != 4:
+def is_xinput_gamepad(descriptor):
+    # Return True if descriptor details match pattern for an XInput gamepad
+    # - descriptor: usb_descriptor.Descriptor instance
+    d = descriptor
+    if d.bDeviceClass != 0xff or len(d.configs) < 1:
         return False
-    return journal.get('Interface 0', None) == 'XInput'
+    if d.configs[0].bNumInterfaces != 4:
+        return False
+    for i in d.interfaces:
+        a = i.bInterfaceNumber   == 0
+        b = i.bInterfaceClass    == 0xff
+        c = i.bInterfaceSubClass == 0x5d
+        if a and b and c:
+            return True
+    return False
 
-def get_device_descriptor(device, journal):
-    # Read and parse USB device descriptor which is always 18 bytes
-    # Return True if descriptor seems okay or False if it looks invalid
-    data = bytearray(18)
-    device.ctrl_transfer(0x80, 6, 1 << 8, 0, data, 100)
-    if data[0] == 0:
-        # Sometimes the descriptor response is all zeros
-        return False
-    if DEBUG:
-        print('Device Descriptor:')
-        print(' ', ' '.join(['%02x' % b for b in data]))
-    device_class = data[4]
-    max_packet_size = data[7]
-    num_configs = data[17]
-    if max_packet_size == 0 or num_configs == 0:
-        return False
-    journal['max_packet_size'] = max_packet_size
-    # This only checks the first config
-    return get_config_descriptor(device, journal, device_class)
+def set_xinput_led(device, player):
+    # Set player number LEDs on XInput gamepad
+    # - device: usb.core.Device
+    # - player: player number in range 1..4
+    report = None
+    if player == 1:
+        report = bytearray(b'\x01\x03\x02')
+    elif player == 2:
+        report = bytearray(b'\x01\x03\x03')
+    elif player == 3:
+        report = bytearray(b'\x01\x03\x04')
+    elif player == 4:
+        report = bytearray(b'\x01\x03\x05')
+    else:
+        raise ValueError("Player number must be in range 1..4")
+    # write(endpoint, data, timeout)
+    device.write(0x02, report, 100)
 
-def get_config_descriptor(device, journal, dev_class):
-    # Read & parse first configuration's descriptor (up to 256 bytes)
-    # NOTE: return value of ctrl_transfer is not useful (always len(data))
-    data = bytearray(256)
-    device.ctrl_transfer(0x80, 6, 2 << 8, 0, data, 500)
-    if data[0] == 0:
-        return False
-    if DEBUG:
-        print('Configuration Descriptor:')
-    # Loop over the configuration descriptor bytes, splitting them into
-    # slices for each sub-descriptor. First byte of each slice is a byte
-    # length for that sub-descriptor.
-    cursor = 0
-    limit = len(data)
-    for i in range(limit):
-        if cursor == limit:
-            break
-        length = data[cursor]
-        if length == 0:
-            break
-        if cursor + length > limit:
-            print(f"Invalid descriptor length: data[{i}] = {length}")
-            return False
-        desc = data[cursor:cursor+length]
-        if DEBUG:
-            print(' ', ' '.join(['%02x' % b for b in desc]))
-        cursor += length
-        # Parse the descriptor
-        if len(desc) < 2:
-            continue
-        desc_type = desc[1]
-        tag = (length << 8) | desc_type
-        if tag == 0x0902:
-            # Configuration descriptor header
-            journal['num_interfaces'] = data[4]
-        elif tag == 0x0904:
-            # Interface descriptor
-            interface_num = desc[2]
-            num_endpoints = desc[4]
-            class_ = desc[5]
-            subclass = desc[6]
-            if interface_num == 0:
-                if dev_class == 0xff and class_ == 0xff and subclass == 0x5d:
-                    journal['Interface 0'] = 'XInput'
-                elif dev_class == 0x00 and class_ == 0x03 and subclass == 0x00:
-                    journal['Interface 0'] = 'HID'
-        elif tag == 0x0705:
-            # Endpoint descriptor
-            endpoints = journal.get('endpoints', [])
-            endpoints.append((
-                '0x%02x' % desc[2],        # address
-                desc[3],                   # attributes
-                (desc[5] << 8) | desc[4],  # max packet size
-                desc[6]                    # polling interval (ms)
-                ))
-            journal['endpoints'] = endpoints
-        elif dev_class == 0x00 and tag == 0x0921:
-            # HID descriptor
-            hid = journal.get('HID', [])
-            hid.append({
-                'num_descriptors': desc[4],
-                'report_type': desc[6],
-                'report_length': (desc[8] << 8) | desc[7]
-                })
-            journal['HID'] = hid
-    return True
-
-# def get_hid_report_descriptor(self, device, journal, length):
-#     # Get HID report descriptor
-#     # Don't attempt to call this prior to set_configuration()
-#     data = bytearray(length)
-#     device.ctrl_transfer(0x81, 6, 0x22 << 8, 0, data, 500)
-#     print(' '.join(['%02x ' % b for b in data]))
 
 class Gamepad:
-    def __init__(self, device, gamepad_type):
+    def __init__(self, device, gamepad_type, player):
         # Initialize buffers used in polling USB gamepad events
+        # - device: usb.core.Device
+        # - gamepad_type: XINPUT or DINPUT
+        # - player: player number for setting gamepad LEDs (in range 1..4)
         self._prev = 0
         self.buf64 = bytearray(64)
         self.timeout_count = 0
         # Set up the gamepad device
         self.device = device
         self.gamepad_type = gamepad_type
+        if gamepad_type != DINPUT and gamepad_type != XINPUT:
+            raise ValueError('Unknown gamepad_type: %d' % gamepad_type)
         self._configure(device, gamepad_type)
+        set_xinput_led(self.device, player)
 
     def _configure(self, device, gamepad_type):
         # Prepare USB gamepad for use (set configuration, drain buffer, etc)
         # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
-        if DEBUG:
-            if gamepad_type == DINPUT:
-                print("Configuring gamepad of type: DInput")
-            if gamepad_type == XINPUT:
-                print("Configuring gamepad of type: XInput")
+        if gamepad_type == DINPUT:
+            logger.debug("Configuring gamepad of type: DInput")
+        if gamepad_type == XINPUT:
+            logger.debug("Configuring gamepad of type: XInput")
         interface = 0
         timeout_ms = 5
         try:
@@ -204,12 +145,10 @@ class Gamepad:
             device.set_configuration()
             sleep(0.01)
         except USBError as e:
-            print("[E1]: '%s', %s, '%s'" % (e, type(e), e.errno))
             self._reset()
             raise e
         if gamepad_type != XINPUT:
-            print("TODO: IMPLEMENT DINPUT SUPPORT")
-            return
+            raise ValueError("TODO: IMPLEMENT DINPUT SUPPORT")
         else:
             # Initial reads may give old data, so drain gamepad's buffer. This
             # may raise an exception (with no string description nor errno!)
@@ -223,7 +162,6 @@ class Gamepad:
                 if e.errno is None:
                     pass  # this is okay
                 else:
-                    print("[E2]: '%s', %s, '%s'" % (e, type(e), e.errno))
                     self._reset()
                     raise e
 
@@ -269,15 +207,14 @@ class Gamepad:
                 # button state is the same as it was last time
                 return (True, False, buttons)
         except USBTimeoutError as e:
+            # Allow for many sequential timeout errors before giving up
             self.timeout_count += 1
             if self.timeout_count < 100:
                 return (True, False, None)
             else:
-                print("\n[E3]: '%s', %s, '%s'" % (e, type(e), e.errno))
                 self._reset()
                 raise e
         except USBError as e:
-            print("\n[E3]: '%s', %s, '%s'" % (e, type(e), e.errno))
             self._reset()
             raise e
 
