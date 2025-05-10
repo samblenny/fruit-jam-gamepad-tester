@@ -138,7 +138,7 @@ class EndpointDesc:
 
 
 class HIDSubDesc:
-    def __init__(bDT, wDL):
+    def __init__(self, bDT, wDL):
         self.bDescriptorType = bDT
         self.wDescriptorLength = wDL
 
@@ -160,11 +160,13 @@ class HIDDesc:
         bNumDescriptors = d[5]
         # Parse list of bDescriptorType + wDescriptorLength pairs with length
         # determined by value of bNumDescriptors
-        if 5 + (bNumDescriptors * 3) != bLength:
+        logger.info('6 + (bNumDescriptors * 3) = %d' % (6 + (bNumDescriptors * 3)))
+        logger.info('bLength = %d' % bLength)
+        if 6 + (bNumDescriptors * 3) != bLength:
             raise ValueError("Bad HID descriptor (bNumDescriptors)")
         sub_descriptors = []
         for i in range(bNumDescriptors):
-            base = 5 + (2 * i)
+            base = 6 + (i * 3)
             bDT = d[base]                        # bDescriptorType
             wDL = (d[base+2] << 8) | d[base+1]   # wDescriptorLength
             sub_descriptors.append(HIDSubDesc(bDT, wDL))
