@@ -65,6 +65,8 @@ def find_gamepad_device():
             logger.info(desc)
             if is_xinput_gamepad(desc):
                 return (device, XINPUT)
+            elif is_dinput_gamepad(desc):
+                return (device, DINPUT)
         except ValueError as e:
             # This happens for errors during descriptor parsing
             logger.error(e)
@@ -74,6 +76,25 @@ def find_gamepad_device():
             logger.error("USBError: '%s', %s, '%s'" % (e, type(e), e.errno))
             pass
     return (None, None)
+
+def is_dinput_gamepad(descriptor):
+    # Return True if descriptor details match pattern for an DInput gamepad
+    # - descriptor: usb_descriptor.Descriptor instance
+    d = descriptor
+    if d.bDeviceClass != 0x00 or len(d.configs) < 1:
+        return False
+    if d.configs[0].bNumInterfaces < 1:
+        return False
+    for i in d.interfaces:
+        # For bInterfaceSubClass: boot keyboard is 0x01, boot mouse is 0x02,
+        # and 0x00 is generic HID report device (check descriptor for details)
+        a = i.bInterfaceNumber   == 0
+        b = i.bInterfaceClass    == 0x03  # HID
+        c = i.bInterfaceSubClass == 0x00  # non-boot
+        if a and b and c:
+            # TODO: check HID descriptor for joystick vs keyboard/mouse/etc
+            return True
+    return False
 
 def is_xinput_gamepad(descriptor):
     # Return True if descriptor details match pattern for an XInput gamepad

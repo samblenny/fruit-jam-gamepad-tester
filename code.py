@@ -75,7 +75,6 @@ def print_bits(buttons):
     print(f"\rbutton bits: {buttons:016b}", end='')
 
 def main():
-    sleep(0.5)
 
     # Make sure display is configured for 320x240 8-bit
     display = supervisor.runtime.display

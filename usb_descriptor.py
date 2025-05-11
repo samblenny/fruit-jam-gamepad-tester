@@ -16,7 +16,7 @@ import adafruit_logging as logging
 
 # Configure logging
 logger = logging.getLogger('usb_descriptor')
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 
 def get_desc(device, desc_type, index=0):
@@ -94,16 +94,29 @@ class InterfaceDesc:
         self.bInterfaceClass    = d[5]
         self.bInterfaceSubClass = d[6]
         self.bInterfaceProtocol = d[7]
+        self.endpoint = []
+        self.hid = []
+
+    def add_endpoint_descriptor(self, data):
+        self.endpoint.append(EndpointDesc(data))
+
+    def add_hid_descriptor(self, data):
+        self.hid.append(HIDDesc(data))
 
     def __str__(self):
         fmt = ('  Interface %d: '
             'Endpoints: %d, Class: 0x%02x, SubClass: 0x%02x, Protocol: 0x%02x')
-        return fmt % (
+        chunks = [fmt % (
             self.bInterfaceNumber,
             self.bNumEndpoints,
             self.bInterfaceClass,
             self.bInterfaceSubClass,
-            self.bInterfaceProtocol)
+            self.bInterfaceProtocol)]
+        for e in self.endpoint:
+            chunks.append(str(e))
+        for h in self.hid:
+            chunks.append(str(h))
+        return '\n'.join(chunks)
 
 
 class EndpointDesc:
@@ -119,25 +132,13 @@ class EndpointDesc:
         self.bInterval          = d[6]
 
     def __str__(self):
-        fmt = ('  Endpoint 0x%02x: '
+        fmt = ('    Endpoint 0x%02x: '
             'bmAttributes: 0x%02x, wMaxPacketSize: %d, bInterval: %d ms')
         return fmt % (
             self.bEndpointAddress,
             self.bmAttributes,
             self.wMaxPacketSize,
             self.bInterval)
-
-
-class HIDSubDesc:
-    def __init__(self, bDT, wDL):
-        self.bDescriptorType = bDT
-        self.wDescriptorLength = wDL
-
-    def __str__(self):
-        fmt = '    bDescriptorType: 0x%02x, wDescriptorLength: %d'
-        return fmt % (
-            self.bDescriptorType,
-            self.wDescriptorLength)
 
 
 class HIDDesc:
@@ -163,12 +164,23 @@ class HIDDesc:
         self.sub_descriptors = sub_descriptors
 
     def __str__(self):
-        fmt = """  HID Descriptor:
-    bNumDescriptors: %d"""
+        fmt = '    HID: bNumDescriptors: %d'
         chunks = [fmt % self.bNumDescriptors]
         for subd in self.sub_descriptors:
             chunks.append(str(subd))
-        return "\n".join(chunks)
+        return '\n'.join(chunks)
+
+
+class HIDSubDesc:
+    def __init__(self, bDT, wDL):
+        self.bDescriptorType = bDT
+        self.wDescriptorLength = wDL
+
+    def __str__(self):
+        fmt = '      bDescriptorType: 0x%02x, wDescriptorLength: %d'
+        return fmt % (
+            self.bDescriptorType,
+            self.wDescriptorLength)
 
 
 class Descriptor:
@@ -200,8 +212,7 @@ class Descriptor:
         logger.debug(dump_desc(conf_desc_list, 'Configuration Descriptor:'))
         self.configs    = []
         self.interfaces = []
-        self.endpoints  = []
-        self.hid        = []
+        i = -1
         for d in conf_desc_list:
             if len(d) < 2:
                 continue
@@ -215,12 +226,20 @@ class Descriptor:
                 elif tag == 0x0904:
                     # Interface
                     self.interfaces.append(InterfaceDesc(d))
+                    # Remember interface index for associating endpoint & HID
+                    i += 1
                 elif tag == 0x0705:
                     # Endpoint
-                    self.endpoints.append(EndpointDesc(d))
+                    if i >= 0:
+                        self.interfaces[i].add_endpoint_descriptor(d)
+                    else:
+                        raise ValueError("Found endpoint before interface")
                 elif self.bDeviceClass == 0x00 and bDescriptorType == 0x21:
                     # HID
-                    self.hid.append(HIDDesc(d))
+                    if i >= 0:
+                        self.interfaces[i].add_hid_descriptor(d)
+                    else:
+                        raise ValueError("Found HID before interface")
             except ValueError as e:
                 logger.error(dump_desc(d, str(e)))
                 raise e
@@ -248,21 +267,7 @@ class Descriptor:
             self.iProduct,
             self.iSerialNumber,
             self.bNumConfigurations)]
-        for lst in [self.configs, self.interfaces, self.endpoints, self.hid]:
+        for lst in [self.configs, self.interfaces]:
             for item in lst:
                 chunks.append(str(item))
         return "\n".join(chunks)
-
-
-# elif tag == 0x0904:
-#     # Interface descriptor
-#     interface_num = desc[2]
-#     num_endpoints = desc[4]
-#     class_ = desc[5]
-#     subclass = desc[6]
-#     if interface_num == 0:
-#         if dev_class == 0xff and class_ == 0xff and subclass == 0x5d:
-#             journal['Interface 0'] = 'XInput'
-#         elif dev_class == 0x00 and class_ == 0x03 and subclass == 0x00:
-#             journal['Interface 0'] = 'HID'
-
