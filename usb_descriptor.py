@@ -8,10 +8,8 @@
 # - https://docs.circuitpython.org/projects/logging/en/latest/api.html
 # - https://learn.adafruit.com/a-logger-for-circuitpython/overview
 #
-from time import sleep
 from usb import core
 from usb.core import USBError, USBTimeoutError
-from micropython import const
 
 import adafruit_logging as logging
 
@@ -152,8 +150,6 @@ class HIDDesc:
         bNumDescriptors = d[5]
         # Parse list of bDescriptorType + wDescriptorLength pairs with length
         # determined by value of bNumDescriptors
-        logger.info('6 + (bNumDescriptors * 3) = %d' % (6 + (bNumDescriptors * 3)))
-        logger.info('bLength = %d' % bLength)
         if 6 + (bNumDescriptors * 3) != bLength:
             raise ValueError("Bad HID descriptor (bNumDescriptors)")
         sub_descriptors = []

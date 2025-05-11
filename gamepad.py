@@ -14,7 +14,6 @@
 # - https://docs.circuitpython.org/projects/logging/en/latest/api.html
 # - https://learn.adafruit.com/a-logger-for-circuitpython/overview
 #
-from time import sleep
 from struct import unpack
 from usb import core
 from usb.core import USBError, USBTimeoutError
@@ -213,5 +212,6 @@ class Gamepad:
             #       should be treated as the device having been unplugged
             raise e
         except USBError as e:
-            self._reset()
+            # TODO: After the next TinyUSB update, perhaps re-consider if this
+            #       should be treated as the device having been unplugged
             raise e
