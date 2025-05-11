@@ -153,7 +153,7 @@ def main():
                 logger.info("Gamepad disconnected. Looking for gamepad...")
             else:
                 # No connection yet, so sleep briefly then try again
-                sleep(1)
+                sleep(0.4)
         except USBError as e:
             # This might mean gamepad was unplugged, or maybe some other
             # low-level USB thing happened which this driver does not yet
