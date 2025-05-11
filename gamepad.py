@@ -85,16 +85,23 @@ def is_dinput_gamepad(descriptor):
         return False
     if d.configs[0].bNumInterfaces < 1:
         return False
+    ifc0_generic = False
     for i in d.interfaces:
-        # For bInterfaceSubClass: boot keyboard is 0x01, boot mouse is 0x02,
-        # and 0x00 is generic HID report device (check descriptor for details)
-        a = i.bInterfaceNumber   == 0
-        b = i.bInterfaceClass    == 0x03  # HID
-        c = i.bInterfaceSubClass == 0x00  # non-boot
-        if a and b and c:
-            # TODO: check HID descriptor for joystick vs keyboard/mouse/etc
-            return True
-    return False
+        n = i.bInterfaceNumber
+        t = (i.bInterfaceClass, i.bInterfaceSubClass, i.bInterfaceProtocol)
+        if t == (0x03, 0x01, 0x01):
+            logger.debug('Interface %d is boot-compatible keyboard' % n)
+        if t == (0x03, 0x01, 0x02):
+            logger.debug('Interface %d is boot-compatible mouse' % n)
+        if t == (0x03, 0x00, 0x00):
+            # This is a generic HID endpoint which might be a gamepad, but if
+            # the interface number is not 0, that's a lot less likely
+            logger.debug('Interface %d is generic HID' % n)
+            logger.debug('TODO: CHECK HID DESCRIPTOR. IS IT A JOYSTICK?')
+            if n == 0:
+                # TODO: actually look inside the HID descriptor for joystick
+                ifc0_generic = True
+    return ifc0_generic
 
 def is_xinput_gamepad(descriptor):
     # Return True if descriptor details match pattern for an XInput gamepad
