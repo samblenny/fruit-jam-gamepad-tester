@@ -117,53 +117,48 @@ class Gamepad:
         # - device: usb.core.Device
         # - gamepad_type: XINPUT or DINPUT
         # - player: player number for setting gamepad LEDs (in range 1..4)
+        # Exceptions:
+        # - may raise usb.core.USBError
+        #
         self._prev = 0
         self.buf64 = bytearray(64)
-        self.timeout_count = 0
-        # Set up the gamepad device
         self.device = device
-        self.gamepad_type = gamepad_type
-        if gamepad_type != DINPUT and gamepad_type != XINPUT:
+        self.player = player
+        if gamepad_type not in [DINPUT, XINPUT]:
             raise ValueError('Unknown gamepad_type: %d' % gamepad_type)
-        self._configure(device, gamepad_type)
-        set_xinput_led(self.device, player)
-
-    def _configure(self, device, gamepad_type):
-        # Prepare USB gamepad for use (set configuration, drain buffer, etc)
-        # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
-        if gamepad_type == DINPUT:
-            logger.debug("Configuring gamepad of type: DInput")
-        if gamepad_type == XINPUT:
-            logger.debug("Configuring gamepad of type: XInput")
+        self.gamepad_type = gamepad_type
+        # Make sure CircuitPython core is not claiming the device
         interface = 0
+        if device.is_kernel_driver_active(interface):
+            logger.debug('Detaching interface %d from kernel' % interface)
+            device.detach_kernel_driver(interface)
+        # Set configuration
+        device.set_configuration()
+        # Initialize gamepad (set LEDs, drain buffer, etc)
+        if gamepad_type == DINPUT:
+            self.init_dinput()
+        elif gamepad_type == XINPUT:
+            self.init_xinput()
+        else:
+            raise ValueError('Unknown gamepad_type: %d' % gamepad_type)
+
+    def init_dinput(self):
+        # Prepare DInput gamepad for use.
+        logger.debug('Initializing DInput gamepad')
+        raise ValueError("TODO: IMPLEMENT DINPUT SUPPORT")
+
+    def init_xinput(self):
+        # Prepare XInput gamepad for use.
+        # Initial reads may give old data, so drain gamepad's buffer.
+        logger.debug('Initializing XInput gamepad')
         timeout_ms = 5
         try:
-            # Make sure CircuitPython core is not claiming the device
-            if device.is_kernel_driver_active(interface):
-                device.detach_kernel_driver(interface)
-            # Make sure that configuration is set
-            device.set_configuration()
-            sleep(0.01)
+            for _ in range(8):
+                self.device.read(0x81, self.buf64, timeout=timeout_ms)
         except USBError as e:
-            self._reset()
-            raise e
-        if gamepad_type != XINPUT:
-            raise ValueError("TODO: IMPLEMENT DINPUT SUPPORT")
-        else:
-            # Initial reads may give old data, so drain gamepad's buffer. This
-            # may raise an exception (with no string description nor errno!)
-            # when buffer is already empty. If that happens, ignore it.
-            try:
-                sleep(0.1)
-                for _ in range(8):
-                    __ = device.read(0x81, self.buf64, timeout=timeout_ms)
-                    self._prev = 0
-            except USBError as e:
-                if e.errno is None:
-                    pass  # this is okay
-                else:
-                    self._reset()
-                    raise e
+            # Ignore exceptions (can happen if there's nothing to read)
+            pass
+        set_xinput_led(self.device, self.player)
 
     def poll(self):
         # Poll gamepad for button changes (ignore sticks and triggers)
@@ -188,12 +183,11 @@ class Gamepad:
         if self.device is None:
             # caller is trying to poll when gamepad is not connected
             return (False, False, None)
-        timeout_ms = 5
         endpoint = 0x81
+        timeout_ms = 5
         try:
             # Poll gamepad endpoint to get button and joystick status bytes
             n = self.device.read(endpoint, self.buf64, timeout=timeout_ms)
-            self.timeout_count = 0
             if n < 14:
                 # skip unexpected responses (too short to be a full report)
                 return (True, False, None)
@@ -207,18 +201,17 @@ class Gamepad:
                 # button state is the same as it was last time
                 return (True, False, buttons)
         except USBTimeoutError as e:
-            # Allow for many sequential timeout errors before giving up
-            self.timeout_count += 1
-            if self.timeout_count < 100:
-                return (True, False, None)
-            else:
-                self._reset()
-                raise e
+            # This sometimes happens when the device is unplugged. It can also
+            # happen under normal conditions. For example, I have a wireless
+            # gamepad that, even when connected by USB-C cable, will start
+            # timing out after a short time with no button presses. But, it
+            # starts responding as soon as you press a button. I'm not aware of
+            # a way to distinguish between the device being unplugged and just
+            # a normal timeout. So, for now, just treat both the same.
+            #
+            # TODO: After the next TinyUSB update, perhaps re-consider if this
+            #       should be treated as the device having been unplugged
+            raise e
         except USBError as e:
             self._reset()
             raise e
-
-    def _reset(self):
-        # Reset USB device and gamepad button polling state
-        self.device = None
-        self._prev = 0

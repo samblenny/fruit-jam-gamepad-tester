@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright 2024 Sam Blenny
 #
-from board import CKP, CKN, D0P, D0N, D1P, D1N, D2P, D2N
+from board import BUTTON1, CKP, CKN, D0P, D0N, D1P, D1N, D2P, D2N
+from digitalio import DigitalInOut
 from displayio import (Bitmap, Group, OnDiskBitmap, Palette, TileGrid,
     release_displays)
 from framebufferio import FramebufferDisplay
@@ -9,7 +10,7 @@ import gc
 from picodvi import Framebuffer
 import supervisor
 from time import sleep
-from usb.core import USBError
+from usb.core import USBError, USBTimeoutError
 import usb_host
 
 import adafruit_imageload
@@ -64,7 +65,14 @@ def update_GUI(scene, prev, buttons):
     if diff & START:
         scene[5, 3] = 11 if (buttons & START) else 25
     if BUTTON_DEBUG:
-        print(f"\r{buttons:016b}", end='')
+        print_bits(buttons)
+
+def print_bits(buttons):
+    # Print binary representation of the buttton state bitfield
+    # CAUTION: This uses CR ('\r') to overwrite the same line so the bits
+    # change in place. It looks better that way, but you need to be sure to
+    # end the line with a LF ('\n') before printing other things.
+    print(f"\rbutton bits: {buttons:016b}", end='')
 
 def main():
     sleep(0.5)
@@ -105,6 +113,9 @@ def main():
     display.root_group = grp
     display.refresh()
 
+    # Configure button #1 as input to trigger USB bus re-connect
+    button_1 = DigitalInOut(BUTTON1)
+
     # MAIN EVENT LOOP
     # Establish and maintain a gamepad connection
     logger.info("Looking for USB gamepad...")
@@ -116,34 +127,39 @@ def main():
             if device and gamepad_type:
                 # Found a gamepad, so configure it and start polling
                 logger.info("Found device. Connecting...")
+                logger.info("  (to rescan USB bus, press Button #1)")
                 player = 1
                 gp = Gamepad(device, gamepad_type, player)
                 logger.debug("Connected")
                 connected = True
                 prev = 0
-                while connected:
-                    (connected, changed, buttons) = gp.poll()
-                    if connected and changed:
-                        update_GUI(scene, prev, buttons)
-                        display.refresh()
-                        need_LF = True
-                        prev = buttons
-                    sleep(0.008)
-                # If loop stopped, gamepad connection was lost
-                if need_LF:
-                    print()  # flush line with button bits from update_GUI()
-                    need_LF = False
+                print_bits(prev)
+                while connected and button_1.value:
+                    try:
+                        (connected, changed, buttons) = gp.poll()
+                        if connected and changed:
+                            update_GUI(scene, prev, buttons)
+                            display.refresh()
+                            prev = buttons
+                    except USBTimeoutError:
+                        # Intentionally ignore timeouts because currently there
+                        # is no good way to distinguish between a normal timeout
+                        # and the device being unplugged. So, rely on button #1
+                        # to manually re-scan the USB bus.
+                        pass
+                # If loop stopped, gamepad connection was lost or somebody
+                # pressed button #1 to request a USB bus re-scan. We need to
+                # flush the line with a LF to clean up after print_bits()
+                print()
                 logger.info("Gamepad disconnected. Looking for gamepad...")
             else:
                 # No connection yet, so sleep briefly then try again
-                sleep(1)
+                sleep(0.3)
         except USBError as e:
             # This might mean gamepad was unplugged, or maybe some other
             # low-level USB thing happened which this driver does not yet
             # know how to deal with. So, log the error and keep going
-            if need_LF:
-                print()  # flush line with button bits from update_GUI()
-                need_LF = False
+            print()  # clean up after print_bits()
             logger.error("USBError: '%s', %s, '%s'" % (e, type(e), e.errno))
             logger.info("Gamepad connection error. Looking for gamepad...")
 
