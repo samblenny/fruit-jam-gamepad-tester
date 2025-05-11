@@ -19,16 +19,16 @@ logger = logging.getLogger('usb_descriptor')
 logger.setLevel(logging.DEBUG)
 
 
-def get_desc(device, desc_type, index=0):
+def get_desc(device, desc_type, bmRequestType=0x80, wIndex=0):
     # Read USB descriptor of type specified by desc_type (index always 0).
     # - device: a usb.core.Device
     # - desc_type: uint8 value for the descriptor type field of wValue
-    # - index: uint8 value for the index field of wValue
+    # - wIndex: uint8 value for selecting interface to use
     # - returns: bytearray with results from ctrl_transfer()
     data = bytearray(256)
     # ctrl_transfer(bmRequestType, bRequest, wValue, wIndex, data, timeout)
-    wValue = (desc_type << 8) | index
-    device.ctrl_transfer(0x80, 6, wValue, 0, data, 300)
+    wValue = (desc_type << 8) | 0
+    device.ctrl_transfer(bmRequestType, 6, wValue, wIndex, data, 300)
     return data
 
 def split_desc(data):
@@ -62,6 +62,8 @@ def dump_desc(data, message=None):
             arr.append(' ' + ' '.join(['%02x' % b for b in row]))
     elif isinstance(data, bytearray):
         arr.append(' ' + ' '.join(['%02x' % b for b in data]))
+    else:
+        log.error("Unexpected dump_desc arg type %s" % type(data))
     return "\n".join(arr)
 
 
@@ -100,8 +102,8 @@ class InterfaceDesc:
     def add_endpoint_descriptor(self, data):
         self.endpoint.append(EndpointDesc(data))
 
-    def add_hid_descriptor(self, data):
-        self.hid.append(HIDDesc(data))
+    def add_hid_descriptor(self, data, device):
+        self.hid.append(HIDDesc(data, device, self.bInterfaceNumber))
 
     def __str__(self):
         fmt = ('  Interface %d: '
@@ -142,9 +144,10 @@ class EndpointDesc:
 
 
 class HIDDesc:
-    def __init__(self, d):
+    def __init__(self, d, device, bInterfaceNumber):
         # Parse an HID descriptor
         # - d: bytearray containing an HID descriptor (9 or more bytes)
+        # - bInterfaceNumber: number of parent interface
         if (len(d) < 9) or (d[0] < 9) or (d[1] != 0x21):
             raise ValueError("Bad HID descriptor")
         bLength         = d[0]
@@ -159,6 +162,14 @@ class HIDDesc:
             bDT = d[base]                        # bDescriptorType
             wDL = (d[base+2] << 8) | d[base+1]   # wDescriptorLength
             sub_descriptors.append(HIDSubDesc(bDT, wDL))
+            # Fetch HID descriptor if it's not too huge
+            if bInterfaceNumber == 0:
+                if bDT == 0x22 and wDL <= 256:
+                    data = get_desc(device, bDT, bmRequestType=0x81,
+                        wIndex=bInterfaceNumber)[:wDL]
+                    logger.debug(dump_desc(data, "HID Report Descriptor"))
+                else:
+                    logger.debug("Ignoring long HID descriptor")
         self.bLength         = bLength
         self.bNumDescriptors = bNumDescriptors
         self.sub_descriptors = sub_descriptors
@@ -237,7 +248,7 @@ class Descriptor:
                 elif self.bDeviceClass == 0x00 and bDescriptorType == 0x21:
                     # HID
                     if i >= 0:
-                        self.interfaces[i].add_hid_descriptor(d)
+                        self.interfaces[i].add_hid_descriptor(d, device)
                     else:
                         raise ValueError("Found HID before interface")
             except ValueError as e:
