@@ -19,13 +19,15 @@ logger = logging.getLogger('usb_descriptor')
 logger.setLevel(logging.DEBUG)
 
 
-def get_desc(device, desc_type, bmRequestType=0x80, wIndex=0):
+def get_desc(device, desc_type, bmRequestType=0x80, wIndex=0, length=256):
     # Read USB descriptor of type specified by desc_type (index always 0).
     # - device: a usb.core.Device
     # - desc_type: uint8 value for the descriptor type field of wValue
     # - wIndex: uint8 value for selecting interface to use
     # - returns: bytearray with results from ctrl_transfer()
-    data = bytearray(256)
+    if not (18 <= length <= 512):
+        raise ValueError("Bad descriptor length: %d" % length)
+    data = bytearray(length)
     # ctrl_transfer(bmRequestType, bRequest, wValue, wIndex, data, timeout)
     wValue = (desc_type << 8) | 0
     device.ctrl_transfer(bmRequestType, 6, wValue, wIndex, data, 300)
@@ -62,7 +64,11 @@ def dump_desc(data, message=None, indent=1):
         for row in data:
             arr.append((' ' * indent) + ' '.join(['%02x' % b for b in row]))
     elif isinstance(data, bytearray):
-        arr.append((' ' * indent) + ' '.join(['%02x' % b for b in data]))
+        # Wrap hexdump to fit in 80 columns
+        bytes_per_line = (80 - indent) // 3
+        for offset in range(0, len(data), bytes_per_line):
+            chunk = data[offset:offset+bytes_per_line]
+            arr.append((' ' * indent) + ' '.join(['%02x' % b for b in chunk]))
     else:
         log.error("Unexpected dump_desc arg type %s" % type(data))
     return "\n".join(arr)
@@ -164,11 +170,11 @@ class HIDDesc:
             wDL = (d[base+2] << 8) | d[base+1]   # wDescriptorLength
             # Fetch HID descriptor if it's not too huge
             hid_report_desc = bytearray(0)
-            if bDT == 0x22 and wDL <= 256:
+            if bDT == 0x22 and wDL <= 512:
                 hid_report_desc = get_desc(device, bDT, bmRequestType=0x81,
-                    wIndex=bInterfaceNumber)[:wDL]
+                    wIndex=bInterfaceNumber, length=wDL)
             else:
-                logger.error("Ignoring long HID descriptor")
+                logger.error("Ignoring long HID descriptor: %d" % wDL)
             sub_descriptors.append(HIDSubDesc(bDT, wDL, hid_report_desc))
         self.bLength         = bLength
         self.bNumDescriptors = bNumDescriptors
@@ -209,14 +215,14 @@ class Descriptor:
         # descriptor before deciding to spend the time and memory on parsing
         # the whole configuration.
         #
-        device_desc = get_desc(device, 0x01)
+        device_desc = get_desc(device, 0x01, length=18)
         length = device_desc[0]
         if length == 0:
             raise ValueError("Empty Device Descriptor")
         elif length != 18:
             raise ValueError('Bad Device Descriptor Length: %d' % length)
         # Parse device descriptor (should be 18 bytes long)
-        d = device_desc[0:18]
+        d = device_desc
         self.device_desc_bytes = d
         self.bDeviceClass       = d[4]
         self.bDeviceSubClass    = d[5]
@@ -236,7 +242,7 @@ class Descriptor:
     def read_configuration(self, device):
         # Read and parse USB configuration descriptor
         # - device: usb.core.Device
-        config_desc_list = split_desc(get_desc(device, 0x02))
+        config_desc_list = split_desc(get_desc(device, 0x02, length=256))
         if len(config_desc_list) == 0:
             raise ValueError("Empty Configuration Descriptor")
         self.config_desc_list = config_desc_list
