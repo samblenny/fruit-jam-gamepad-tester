@@ -26,7 +26,7 @@ import usb_descriptor
 
 # Configure logging
 logger = logging.getLogger('gamepad')
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 
 # Gamepad button bitmask constants
@@ -49,11 +49,12 @@ XINPUT = const(2)
 
 # Configure logging
 logger = logging.getLogger('gamepad')
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 
-def find_gamepad_device():
+def find_gamepad_device(device_cache):
     # Find a USB wired gamepad by inspecting usb device descriptors
+    # - device_cache: dictionary of previously checked device descriptors
     # - return: (usb.core.Device, gamepad_type constant) or (None, None)
     # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
     #
@@ -62,6 +63,17 @@ def find_gamepad_device():
         # to help identify DInput or XInput gamepads
         try:
             desc = usb_descriptor.Descriptor(device)
+            k = str(desc.to_bytes())
+            if k in device_cache:
+                # Ignore previously checked devices. The point of this is to
+                # avoid repeatedly spewing log output about devices that are
+                # not interesting (e.g. want a gamepad but found a keyboard)
+                logger.debug("Ignoring cached device")
+                return (None, None)
+            # Remember this device to avoid repeatedly checking it later
+            device_cache[k] = True
+            # Read and parse the device's configuration descriptor
+            desc.read_configuration(device)
             logger.info(desc)
             if is_xinput_gamepad(desc):
                 return (device, XINPUT)
@@ -90,14 +102,14 @@ def is_dinput_gamepad(descriptor):
         n = i.bInterfaceNumber
         t = (i.bInterfaceClass, i.bInterfaceSubClass, i.bInterfaceProtocol)
         if t == (0x03, 0x01, 0x01):
-            logger.debug('Interface %d is boot-compatible keyboard' % n)
+            logger.info('Interface %d is boot-compatible keyboard' % n)
         if t == (0x03, 0x01, 0x02):
-            logger.debug('Interface %d is boot-compatible mouse' % n)
+            logger.info('Interface %d is boot-compatible mouse' % n)
         if t == (0x03, 0x00, 0x00):
             # This is a generic HID endpoint which might be a gamepad, but if
             # the interface number is not 0, that's a lot less likely
-            logger.debug('Interface %d is generic HID' % n)
-            logger.debug('TODO: CHECK HID DESCRIPTOR. IS IT A JOYSTICK?')
+            logger.info('Interface %d is generic HID' % n)
+            logger.error('TODO: CHECK HID DESCRIPTOR. IS IT A JOYSTICK?')
             if n == 0:
                 # TODO: actually look inside the HID descriptor for joystick
                 ifc0_generic = True
@@ -171,13 +183,13 @@ class Gamepad:
 
     def init_dinput(self):
         # Prepare DInput gamepad for use.
-        logger.debug('Initializing DInput gamepad')
+        logger.info('Initializing DInput gamepad')
         raise ValueError("TODO: IMPLEMENT DINPUT SUPPORT")
 
     def init_xinput(self):
         # Prepare XInput gamepad for use.
         # Initial reads may give old data, so drain gamepad's buffer.
-        logger.debug('Initializing XInput gamepad')
+        logger.info('Initializing XInput gamepad')
         timeout_ms = 5
         try:
             for _ in range(8):

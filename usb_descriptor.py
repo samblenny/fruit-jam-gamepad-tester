@@ -51,17 +51,18 @@ def split_desc(data):
         cursor += length
     return slices
 
-def dump_desc(data, message=None):
+def dump_desc(data, message=None, indent=1):
     # Hexdump a descriptor
     # - data: bytearray or [bytes, ...] with descriptor from ctrl_transfer()
     # - message: header message to print before the hexdump
+    # - indent: number of spaces to put at the start of each line
     # - returns: hexdump string
-    arr = [message]
+    arr = [message] if message else []
     if isinstance(data, list):
         for row in data:
-            arr.append(' ' + ' '.join(['%02x' % b for b in row]))
+            arr.append((' ' * indent) + ' '.join(['%02x' % b for b in row]))
     elif isinstance(data, bytearray):
-        arr.append(' ' + ' '.join(['%02x' % b for b in data]))
+        arr.append((' ' * indent) + ' '.join(['%02x' % b for b in data]))
     else:
         log.error("Unexpected dump_desc arg type %s" % type(data))
     return "\n".join(arr)
@@ -161,15 +162,14 @@ class HIDDesc:
             base = 6 + (i * 3)
             bDT = d[base]                        # bDescriptorType
             wDL = (d[base+2] << 8) | d[base+1]   # wDescriptorLength
-            sub_descriptors.append(HIDSubDesc(bDT, wDL))
             # Fetch HID descriptor if it's not too huge
-            if bInterfaceNumber == 0:
-                if bDT == 0x22 and wDL <= 256:
-                    data = get_desc(device, bDT, bmRequestType=0x81,
-                        wIndex=bInterfaceNumber)[:wDL]
-                    logger.debug(dump_desc(data, "HID Report Descriptor"))
-                else:
-                    logger.debug("Ignoring long HID descriptor")
+            hid_report_desc = bytearray(0)
+            if bDT == 0x22 and wDL <= 256:
+                hid_report_desc = get_desc(device, bDT, bmRequestType=0x81,
+                    wIndex=bInterfaceNumber)[:wDL]
+            else:
+                logger.error("Ignoring long HID descriptor")
+            sub_descriptors.append(HIDSubDesc(bDT, wDL, hid_report_desc))
         self.bLength         = bLength
         self.bNumDescriptors = bNumDescriptors
         self.sub_descriptors = sub_descriptors
@@ -183,20 +183,32 @@ class HIDDesc:
 
 
 class HIDSubDesc:
-    def __init__(self, bDT, wDL):
+    def __init__(self, bDT, wDL, hid_report_desc):
         self.bDescriptorType = bDT
         self.wDescriptorLength = wDL
+        self.hid_report_desc = hid_report_desc
 
     def __str__(self):
-        fmt = '      bDescriptorType: 0x%02x, wDescriptorLength: %d'
+        fmt = """      bDescriptorType: 0x%02x, wDescriptorLength: %d
+      HID Report Descriptor Bytes:
+%s"""
         return fmt % (
             self.bDescriptorType,
-            self.wDescriptorLength)
+            self.wDescriptorLength,
+            dump_desc(self.hid_report_desc, indent=8))
 
 
 class Descriptor:
     def __init__(self, device):
-        # Read and parse descriptors for USB device and configuration
+        # Read and parse USB device descriptor
+        # - device: usb.core.Device
+        #
+        # CAUTION: This does not read the configuration descriptor. You do that
+        # by calling read_configuration(). The point of splitting the work into
+        # two functions is to let the calling code quickly check the device
+        # descriptor before deciding to spend the time and memory on parsing
+        # the whole configuration.
+        #
         device_desc = get_desc(device, 0x01)
         length = device_desc[0]
         if length == 0:
@@ -205,7 +217,7 @@ class Descriptor:
             raise ValueError('Bad Device Descriptor Length: %d' % length)
         # Parse device descriptor (should be 18 bytes long)
         d = device_desc[0:18]
-        logger.debug(dump_desc(d, 'Device Descriptor:'))
+        self.device_desc_bytes = d
         self.bDeviceClass       = d[4]
         self.bDeviceSubClass    = d[5]
         self.bDeviceProtocol    = d[6]
@@ -216,15 +228,22 @@ class Descriptor:
         self.iProduct           = d[15]
         self.iSerialNumber      = d[16]
         self.bNumConfigurations = d[17]
-        # Read and parse configuration descriptor
-        conf_desc_list = split_desc(get_desc(device, 0x02))
-        if len(conf_desc_list) == 0:
+        # Make an empty placeholder configuration
+        self.config_desc_list = []
+        self.configs = []
+        self.interfaces = []
+
+    def read_configuration(self, device):
+        # Read and parse USB configuration descriptor
+        # - device: usb.core.Device
+        config_desc_list = split_desc(get_desc(device, 0x02))
+        if len(config_desc_list) == 0:
             raise ValueError("Empty Configuration Descriptor")
-        logger.debug(dump_desc(conf_desc_list, 'Configuration Descriptor:'))
+        self.config_desc_list = config_desc_list
         self.configs    = []
         self.interfaces = []
         i = -1
-        for d in conf_desc_list:
+        for d in config_desc_list:
             if len(d) < 2:
                 continue
             bLength = d[0]
@@ -255,8 +274,15 @@ class Descriptor:
                 logger.error(dump_desc(d, str(e)))
                 raise e
 
+    def to_bytes(self):
+        return self.device_desc_bytes
+
     def __str__(self):
         fmt = """Descriptor:
+  Device Descriptor Bytes:
+%s
+  Config Descriptor Bytes:
+%s
   bDeviceClass: 0x%02x
   bDeviceSubClass: 0x%02x
   bDeviceProtocol: 0x%02x
@@ -268,6 +294,8 @@ class Descriptor:
   iSerialNumber: %d
   bNumConfigurations: %d"""
         chunks = [fmt % (
+            dump_desc(self.device_desc_bytes, indent=4),
+            dump_desc(self.config_desc_list, indent=4),
             self.bDeviceClass,
             self.bDeviceSubClass,
             self.bDeviceProtocol,

@@ -118,11 +118,15 @@ def main():
     # MAIN EVENT LOOP
     # Establish and maintain a gamepad connection
     logger.info("Looking for USB gamepad...")
+    device_cache = {}
     while True:
         gc.collect()
         need_LF = False
         try:
-            (device, gamepad_type) = find_gamepad_device()
+            # The point of device_cache is to avoid repeatedly checking the
+            # same non-gamepad device once it's been identified as something
+            # other than a gamepad.
+            (device, gamepad_type) = find_gamepad_device(device_cache)
             if device and gamepad_type:
                 # Found a gamepad, so configure it and start polling
                 logger.info("Found device. Connecting...")
@@ -151,6 +155,7 @@ def main():
                 # flush the line with a LF to clean up after print_bits()
                 print()
                 logger.info("Gamepad disconnected. Looking for gamepad...")
+                device_cache = {}
             else:
                 # No connection yet, so sleep briefly then try again
                 sleep(0.4)
@@ -161,6 +166,7 @@ def main():
             print()  # clean up after print_bits()
             logger.error("USBError: '%s', %s, '%s'" % (e, type(e), e.errno))
             logger.info("Gamepad connection error. Looking for gamepad...")
+            device_cache = {}
 
 
 main()
