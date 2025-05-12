@@ -47,10 +47,6 @@ X      = const(0x8000)  # button cluster: top button    (Nintendo X, Xbox Y)
 DINPUT = const(1)
 XINPUT = const(2)
 
-# Configure logging
-logger = logging.getLogger('gamepad')
-logger.setLevel(logging.INFO)
-
 
 def find_gamepad_device(device_cache):
     # Find a USB wired gamepad by inspecting usb device descriptors
