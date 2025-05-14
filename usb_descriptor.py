@@ -21,6 +21,21 @@ logger = logging.getLogger('usb_descriptor')
 logger.setLevel(logging.DEBUG)
 
 
+# =============================
+# == TODO: REMOVE THIS ========
+# =============================
+from test_data import TEST_DATA
+# Dump test data
+for k in sorted(TEST_DATA):
+    v = TEST_DATA[k]
+    msg = '=== %s ===' % k
+    hr = '=' * len(msg)
+    print(hr)
+    print(msg)
+    print(hr)
+    print(v)
+# =============================
+
 def get_desc(device, desc_type, bmRequestType=0x80, wIndex=0, length=256):
     # Read USB descriptor of type specified by desc_type (index always 0).
     # - device: a usb.core.Device
