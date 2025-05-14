@@ -21,20 +21,20 @@ logger = logging.getLogger('usb_descriptor')
 logger.setLevel(logging.DEBUG)
 
 
-# =============================
-# == TODO: REMOVE THIS ========
-# =============================
-from test_data import TEST_DATA
-# Dump test data
-for k in sorted(TEST_DATA):
-    v = TEST_DATA[k]
-    msg = '=== %s ===' % k
-    hr = '=' * len(msg)
-    print(hr)
-    print(msg)
-    print(hr)
-    print(v)
-# =============================
+def test_hid_report_descriptor_parser():
+    # Call this if you want to test the HID report descriptor parser
+    # CAUTION: This import will use a lot of memory for strings and bytearrays
+    import test_data
+#     device = test_data.COMPACT_KEYBOARD
+#     device = test_data.CHEAP_MOUSE
+#     device = test_data.POWERA
+#     device = test_data.ULTIMATE_BT
+#     device = test_data.ZERO2
+    device = test_data.SN30PRO_BT_DINPUT
+#     device = test_data.SN30PRO_BT_SWITCH
+    hid_report_desc = device['interfaces'][0]['hidreport']
+    print()
+    print(HIDReportDesc(hid_report_desc, indent=0))
 
 def get_desc(device, desc_type, bmRequestType=0x80, wIndex=0, length=256):
     # Read USB descriptor of type specified by desc_type (index always 0).

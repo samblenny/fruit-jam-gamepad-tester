@@ -115,6 +115,15 @@ def main():
     # Configure button #1 as input to trigger USB bus re-connect
     button_1 = DigitalInOut(BUTTON1)
 
+# =============================
+# == TODO: REMOVE THIS ========
+# =============================
+    import usb_descriptor
+    usb_descriptor.test_hid_report_descriptor_parser()
+    print()
+# =============================
+
+
     # MAIN EVENT LOOP
     # Establish and maintain a gamepad connection
     logger.info("Looking for USB gamepad...")
