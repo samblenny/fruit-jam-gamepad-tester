@@ -43,10 +43,14 @@ A      = const(0x2000)  # button cluster: right button  (Nintendo A, Xbox B)
 Y      = const(0x4000)  # button cluster: left button   (Nintendo Y, Xbox X)
 X      = const(0x8000)  # button cluster: top button    (Nintendo X, Xbox Y)
 
-# Gamepad USB protocol type constants
-DINPUT = const(1)
-XINPUT = const(2)
-OTHER  = const(3)
+# USB detected device types
+TYPE_SWITCH_PRO    = const(1)
+TYPE_XINPUT        = const(2)
+TYPE_BOOT_MOUSE    = const(3)
+TYPE_BOOT_KEYBOARD = const(4)
+TYPE_HID_GAMEPAD   = const(5)
+TYPE_HID           = const(6)
+TYPE_OTHER         = const(7)
 
 
 def find_usb_device(device_cache):
@@ -75,12 +79,28 @@ def find_usb_device(device_cache):
             dev_info = desc.dev_class_subclass_protocol()
             int0_info = desc.int0_class_subclass_protocol()
             logger.info(desc)
-            dev_type = OTHER
-            if is_xinput_gamepad(desc):
-                dev_type = XINPUT
-            elif is_dinput_gamepad(desc):
-                dev_type = DINPUT
-            return ScanResult(device, dev_type, vid, pid, dev_info, int0_info)
+            dev_type = TYPE_OTHER
+            tag = ''
+            if (vid, pid) == (0x057e, 0x2009):
+                dev_type = TYPE_SWITCH_PRO
+                tag = 'SwitchPro'
+            elif is_xinput_gamepad(desc):
+                dev_type = TYPE_XINPUT
+                tag = 'XInput'
+            elif is_hid_gamepad(desc):
+                dev_type = TYPE_HID_GAMEPAD
+                tag = 'HIDGamepad'
+            elif int0_info == (0x03, 0x01, 0x01):
+                dev_type = TYPE_BOOT_KEYBOARD
+                tag = 'BootKeyboard'
+            elif int0_info == (0x03, 0x01, 0x02):
+                dev_type = TYPE_BOOT_MOUSE
+                tag = 'BootMouse'
+            elif sr.int0_info == (0x03, 0x00, 0x00):
+                dev_type = TYPE_HID
+                tag = 'HID'
+            return ScanResult(device, dev_type, vid, pid, tag,
+                dev_info, int0_info)
         except ValueError as e:
             # This happens for errors during descriptor parsing
             logger.error(e)
@@ -93,7 +113,7 @@ def find_usb_device(device_cache):
 
 
 class ScanResult:
-    def __init__(self, device, dev_type, vid, pid, dev_info, int0_info):
+    def __init__(self, device, dev_type, vid, pid, tag, dev_info, int0_info):
         if len(dev_info) != 3:
             raise ValueError("Expected (class,subclass,protocol) for dev_info")
         if len(int0_info) != 3:
@@ -102,50 +122,46 @@ class ScanResult:
         self.dev_type = dev_type
         self.vid = vid
         self.pid = pid
+        self.tag = tag
         self.dev_info = dev_info
         self.int0_info = int0_info
 
 
-def is_dinput_gamepad(descriptor):
-    # Return True if descriptor details match pattern for an DInput gamepad
+def is_hid_gamepad(descriptor):
+    # Return True if descriptor details match pattern for generic HID gamepad
     # - descriptor: usb_descriptor.Descriptor instance
-    d = descriptor
-    if d.bDeviceClass != 0x00 or len(d.configs) < 1:
+    #
+    # This should generally work for PC style DInput gamepads and other types
+    # of vanilla HID gamepads, such as inexpensive (non-Pro) USB wired Switch
+    # controllers.
+    #
+    # CAUTION! Button, dpad, stick, and trigger mappings for this type of
+    # gamepad are notoriously quirky. Control layout within the HID reports is
+    # up to the manufacturer. Some devices may send HID reports that do not
+    # match what's listed in their HID report descriptors.
+    dev_info = descriptor.dev_class_subclass_protocol()
+    int0_info = descriptor.int0_class_subclass_protocol()
+    if dev_info != (0x00, 0x00, 0x00):
         return False
-    if d.configs[0].bNumInterfaces < 1:
-        return False
-    ifc0_generic = False
-    for i in d.interfaces:
-        n = i.bInterfaceNumber
-        t = (i.bInterfaceClass, i.bInterfaceSubClass, i.bInterfaceProtocol)
-        if t == (0x03, 0x01, 0x01):
-            logger.info('Interface %d is boot-compatible keyboard' % n)
-        if t == (0x03, 0x01, 0x02):
-            logger.info('Interface %d is boot-compatible mouse' % n)
-        if t == (0x03, 0x00, 0x00):
-            # This is a generic HID endpoint which might be a gamepad, but if
-            # the interface number is not 0, that's a lot less likely
-            logger.info('Interface %d is generic HID' % n)
-            logger.error('TODO: CHECK HID DESCRIPTOR. IS IT A JOYSTICK?')
-            if n == 0:
-                # TODO: actually look inside the HID descriptor for joystick
-                ifc0_generic = True
-    return ifc0_generic
+    if int0_info == (0x03, 0x00, 0x00):
+        # This is a composite HID interface. Might be gamepad. Might not.
+        # TODO: actually look inside the HID descriptor for gamepad/joystick
+        logger.error('TODO: CHECK HID REPORT DESCRIPTOR. GAMEPAD?')
+        return True
+    return False
 
 def is_xinput_gamepad(descriptor):
     # Return True if descriptor details match pattern for an XInput gamepad
     # - descriptor: usb_descriptor.Descriptor instance
     d = descriptor
-    if d.bDeviceClass != 0xff or len(d.configs) < 1:
+    dev_info = descriptor.dev_class_subclass_protocol()
+    int0_info = descriptor.int0_class_subclass_protocol()
+    if dev_info != (0xff, 0xff, 0xff):
         return False
     if d.configs[0].bNumInterfaces != 4:
         return False
-    for i in d.interfaces:
-        a = i.bInterfaceNumber   == 0
-        b = i.bInterfaceClass    == 0xff
-        c = i.bInterfaceSubClass == 0x5d
-        if a and b and c:
-            return True
+    if int0_info == (0xff, 0x5d, 0x01):
+        return True
     return False
 
 def set_xinput_led(device, player):
@@ -168,21 +184,20 @@ def set_xinput_led(device, player):
 
 
 class InputDevice:
-    def __init__(self, device, device_type, player):
+    def __init__(self, scan_result, player=1):
         # Initialize buffers used in polling USB gamepad events
-        # - device: usb.core.Device
-        # - device_type: XINPUT, DINPUT, OTHER
+        # - scan_result: a ScanResult instance
         # - player: player number for setting gamepad LEDs (in range 1..4)
         # Exceptions:
         # - may raise usb.core.USBError
         #
+        device = scan_result.device
+        dev_type = scan_result.dev_type
         self._prev = 0
         self.buf64 = bytearray(64)
         self.device = device
         self.player = player
-        if device_type not in [DINPUT, XINPUT, OTHER]:
-            raise ValueError('Unknown device_type: %d' % device_type)
-        self.device_type = device_type
+        self.dev_type = dev_type
         # Make sure CircuitPython core is not claiming the device
         interface = 0
         if device.is_kernel_driver_active(interface):
@@ -190,20 +205,33 @@ class InputDevice:
             device.detach_kernel_driver(interface)
         # Set configuration
         device.set_configuration()
-        # Initialize gamepad (set LEDs, drain buffer, etc)
-        if device_type == DINPUT:
-            self.init_dinput()
-        elif device_type == XINPUT:
+        # Initialize USB device if needed (e.g. handshake or set gamepad LEDs)
+        if dev_type == TYPE_SWITCH_PRO:
+            logger.error("TODO: IMPLEMENT SWITCH PRO HANDSHAKE")
+        elif dev_type == TYPE_XINPUT:
             self.init_xinput()
-        elif device_type == OTHER:
-            logger.error("TODO: divide OTHER into Switch/kbd/mouse/generic/etc")
+        elif dev_type == TYPE_BOOT_MOUSE:
+            # TODO: maybe implement something for this. maybe.
+            pass
+        elif dev_type == TYPE_BOOT_KEYBOARD:
+            # TODO: maybe implement something for this. maybe.
+            pass
+        elif dev_type == TYPE_HID_GAMEPAD:
+            # This covers PC style "DirectInput" or "DInput" along with other
+            # types of generic HID gamepads (e.g. non-Pro Switch controllers)
+            self.init_hid_gamepad()
+        elif dev_type == TYPE_HID:
+            # TODO: maybe dump some HID descriptor info?
+            pass
+        elif dev_type == TYPE_OTHER:
+            # ignore these
+            pass
         else:
-            raise ValueError('Unknown device_type: %d' % device_type)
+            raise ValueError('Unknown dev_type: %d' % dev_type)
 
-    def init_dinput(self):
-        # Prepare DInput gamepad for use.
-        logger.info('Initializing DInput gamepad')
-        logger.error("TODO: IMPLEMENT DINPUT SUPPORT")
+    def init_hid_gamepad(self):
+        # Prepare generic HID gamepad for use.
+        logger.error("TODO: IMPLEMENT HID GAMEPAD SUPPORT")
 
     def init_xinput(self):
         # Prepare XInput gamepad for use.
@@ -218,8 +246,13 @@ class InputDevice:
             pass
         set_xinput_led(self.device, self.player)
 
-    def poll(self):
-        # Poll gamepad for button changes (ignore sticks and triggers)
+    def poll_switch(self):
+        # Poll Switch Pro gamepad for button changes
+        # TODO: IMPLEMENT THIS
+        return (True, False, None)
+
+    def poll_xinput(self):
+        # Poll xinput gamepad for button changes (ignore sticks and triggers)
         #
         # Returns a tuple of (valid, changed, buttons):
         #   connected: True if gamepad is still connected, else False
@@ -238,7 +271,7 @@ class InputDevice:
         #  bytes 12,13:  RY right stick Y axis (int16)   [ignored]
         #  bytes 14..19: ???, but they don't change
         #
-        if self.device_type != XINPUT:
+        if self.dev_type != TYPE_XINPUT:
             # TODO: deal with the other device types
             return (True, False, None)
         if self.device is None:
@@ -277,3 +310,8 @@ class InputDevice:
             # TODO: After the next TinyUSB update, perhaps re-consider if this
             #       should be treated as the device having been unplugged
             raise e
+
+    def poll_hid_gamepad(self):
+        # Poll generic HID gamepad for button changes (also works for DInput)
+        # TODO: IMPLEMENT THIS
+        return (True, False, None)

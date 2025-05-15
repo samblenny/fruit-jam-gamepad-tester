@@ -275,14 +275,18 @@ class Descriptor:
         return (self.idVendor, self.idProduct)
 
     def dev_class_subclass_protocol(self):
+        # Return class, subclass, and protocol from devic descriptor
         return (self.bDeviceClass, self.bDeviceSubClass, self.bDeviceProtocol)
 
     def int0_class_subclass_protocol(self):
-        if len(self.interfaces) < 1:
-            return (None, None, None)
-        i0 = self.interfaces[0]
-        return (i0.bInterfaceClass, i0.bInterfaceSubClass,
-            i0.bInterfaceProtocol)
+        # Return class, subclass, and protocol for interface 0
+        for i in self.interfaces:
+            if i.bInterfaceNumber == 0:
+                return (
+                    i.bInterfaceClass,
+                    i.bInterfaceSubClass,
+                    i.bInterfaceProtocol)
+        return (None, None, None)
 
     def read_configuration(self, device):
         # Read and parse USB configuration descriptor

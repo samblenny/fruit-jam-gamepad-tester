@@ -20,14 +20,13 @@ import adafruit_logging as logging
 
 from gamepad import (
     find_usb_device, InputDevice,
-    UP, DOWN, LEFT, RIGHT, START, SELECT, L, R, A, B, X, Y)
+    UP, DOWN, LEFT, RIGHT, START, SELECT, L, R, A, B, X, Y,
+    TYPE_SWITCH_PRO, TYPE_XINPUT, TYPE_HID_GAMEPAD)
 
 
 # Configure logging
 logger = logging.getLogger('code.py')
 logger.setLevel(logging.DEBUG)
-
-BUTTON_DEBUG = const(True)
 
 
 def update_GUI(scene, prev, buttons, status):
@@ -95,8 +94,6 @@ def update_GUI(scene, prev, buttons, status):
         scene[4, 3] = 10 if (buttons & SELECT) else 24
     if diff & START:
         scene[5, 3] = 11 if (buttons & START) else 25
-    if BUTTON_DEBUG:
-        print_bits(buttons)
     status.anchored_position = x, y
 
 def print_bits(buttons):
@@ -180,49 +177,76 @@ def main():
             # CAUTION! Allowing a display refresh between the calls to
             # usb.core.find() and usb.core.Device.set_configuration() may
             # cause unpredictable behavior.
+            dev = InputDevice(scan_result)
             sr = scan_result
-            vid_pid = (sr.vid, sr.pid)
-            dev_info = sr.dev_info
-            int0_info = sr.int0_info
-            input_dev = InputDevice(sr.device, sr.dev_type, player=1)
-            composite = (sr.dev_info == (0x00, 0x00, 0x00))
-            tag = ''
-            if vid_pid == (0x045e, 0x028e):
-                tag = 'Xbox360'
-            elif vid_pid == (0x057e, 0x2009):
-                tag = 'SwitchPro'
-            elif sr.int0_info == (0x03, 0x01, 0x01):
-                tag = 'Boot Keyboard'
-            elif sr.int0_info == (0x03, 0x01, 0x02):
-                tag = 'Boot Mouse'
-            elif sr.int0_info == (0x03, 0x00, 0x00):
-                tag = 'Composite HID'
-            fmt_args = vid_pid + (tag,) + dev_info + int0_info
+            fmt_args = (sr.vid, sr.pid, sr.tag) + sr.dev_info + sr.int0_info
             set_status(("%04X:%04X %s\n"  # vid:pid tag
                 "dev  %02X:%02X:%02X\n"   # device class:subclass:protocol
                 "int0 %02X:%02X:%02X\n"   # interface 0 class:subclass:proto.
                 "(button 1: rescan bus)") %
                 fmt_args)
+            # Start polling for input. The button_1.value stuff is checking for
+            # Fruit Jam's Button #1. Pressing the button stops the loop which
+            # triggers a re-scan of the USB bus. Having a USB feature rely on
+            # manual re-scan is wierd, but since unplug detection is currently
+            # unreliable, it's helpful.
+            #
+            # The polling functions in the loops below intentionally ignore
+            # timeouts because currently there is no good way to distinguish
+            # between a normal timeout and the device being unplugged.
             connected = True
             prev = 0
-            print_bits(prev)
-            while connected and button_1.value:
-                try:
-                    (connected, changed, buttons) = input_dev.poll()
-                    if connected and changed:
-                        update_GUI(scene, prev, buttons, status)
-                        display.refresh()
-                        prev = buttons
-                except USBTimeoutError:
-                    # Intentionally ignore timeouts because currently there
-                    # is no good way to distinguish between a normal timeout
-                    # and the device being unplugged. So, rely on button #1
-                    # to manually re-scan the USB bus.
-                    pass
+            dev_type = sr.dev_type
+
+            # POLL SWITCH PRO
+            if dev_type == TYPE_SWITCH_PRO:
+                while connected and button_1.value:
+                    result = None
+                    try:
+                        (connected, changed, buttons) = dev.poll_switch()
+                        if connected and changed:
+                            update_GUI(scene, prev, buttons, status)
+                            display.refresh()
+                            prev = buttons
+                    except USBTimeoutError:
+                        pass
+
+            # POLL XINPUT
+            elif dev_type == TYPE_XINPUT:
+                print_bits(prev)
+                while connected and button_1.value:
+                    result = None
+                    try:
+                        (connected, changed, buttons) = dev.poll_xinput()
+                        if connected and changed:
+                            update_GUI(scene, prev, buttons, status)
+                            print_bits(buttons)  # NOTE: uses print(..., end='')
+                            display.refresh()
+                            prev = buttons
+                    except USBTimeoutError:
+                        pass
+                # start new line to clean up after print_bits()
+                print()
+
+            # POLL GENERIC HID GAMEPAD
+            elif dev_type == TYPE_HID_GAMEPAD:
+                while connected and button_1.value:
+                    result = None
+                    try:
+                        (connected, changed, buttons) = dev.poll_hid_gamepad()
+                        if connected and changed:
+                            update_GUI(scene, prev, buttons, status)
+                            display.refresh()
+                            prev = buttons
+                    except USBTimeoutError:
+                        pass
+
+            # For now, don't poll for the other device types
+            else:
+                while button_1.value:
+                    sleep(0.1)
             # If loop stopped, gamepad connection was lost or somebody
-            # pressed button #1 to request a USB bus re-scan. We need to
-            # flush the line with a LF to clean up after print_bits()
-            print()
+            # pressed button #1 to request a USB bus re-scan.
             set_status("Device disconnected.\nScanning USB bus...")
             device_cache = {}
         except USBError as e:
