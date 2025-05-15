@@ -46,14 +46,13 @@ X      = const(0x8000)  # button cluster: top button    (Nintendo X, Xbox Y)
 # Gamepad USB protocol type constants
 DINPUT = const(1)
 XINPUT = const(2)
+OTHER  = const(3)
 
 
-def find_gamepad_device(device_cache):
+def find_usb_device(device_cache):
     # Find a USB wired gamepad by inspecting usb device descriptors
     # - device_cache: dictionary of previously checked device descriptors
-    # - return: tuple with (usb.core.Device, gamepad_type constant, idVendor,
-    #   idProduct, bDeviceClass, bDeviceSubClass, bDeviceProtocol) for success,
-    #   or None for failure.
+    # - return: ScanResult object for success or None for failure.
     # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
     #
     for device in core.find(find_all=True):
@@ -73,12 +72,15 @@ def find_gamepad_device(device_cache):
             # Read and parse the device's configuration descriptor
             desc.read_configuration(device)
             vid, pid = desc.vid_pid()
-            class_, subclass, protocol = desc.class_subclass_protocol()
+            dev_info = desc.dev_class_subclass_protocol()
+            int0_info = desc.int0_class_subclass_protocol()
             logger.info(desc)
+            dev_type = OTHER
             if is_xinput_gamepad(desc):
-                return (device, XINPUT, vid, pid, class_, subclass, protocol)
+                dev_type = XINPUT
             elif is_dinput_gamepad(desc):
-                return (device, DINPUT, vid, pid, class_, subclass, protocol)
+                dev_type = DINPUT
+            return ScanResult(device, dev_type, vid, pid, dev_info, int0_info)
         except ValueError as e:
             # This happens for errors during descriptor parsing
             logger.error(e)
@@ -88,6 +90,21 @@ def find_gamepad_device(device_cache):
             logger.error("USBError: '%s', %s, '%s'" % (e, type(e), e.errno))
             pass
     return None
+
+
+class ScanResult:
+    def __init__(self, device, dev_type, vid, pid, dev_info, int0_info):
+        if len(dev_info) != 3:
+            raise ValueError("Expected (class,subclass,protocol) for dev_info")
+        if len(int0_info) != 3:
+            raise ValueError("Expected (class,subclass,protocol) for int0_info")
+        self.device = device
+        self.dev_type = dev_type
+        self.vid = vid
+        self.pid = pid
+        self.dev_info = dev_info
+        self.int0_info = int0_info
+
 
 def is_dinput_gamepad(descriptor):
     # Return True if descriptor details match pattern for an DInput gamepad
@@ -150,11 +167,11 @@ def set_xinput_led(device, player):
     device.write(0x02, report, 100)
 
 
-class Gamepad:
-    def __init__(self, device, gamepad_type, player):
+class InputDevice:
+    def __init__(self, device, device_type, player):
         # Initialize buffers used in polling USB gamepad events
         # - device: usb.core.Device
-        # - gamepad_type: XINPUT or DINPUT
+        # - device_type: XINPUT, DINPUT, OTHER
         # - player: player number for setting gamepad LEDs (in range 1..4)
         # Exceptions:
         # - may raise usb.core.USBError
@@ -163,9 +180,9 @@ class Gamepad:
         self.buf64 = bytearray(64)
         self.device = device
         self.player = player
-        if gamepad_type not in [DINPUT, XINPUT]:
-            raise ValueError('Unknown gamepad_type: %d' % gamepad_type)
-        self.gamepad_type = gamepad_type
+        if device_type not in [DINPUT, XINPUT, OTHER]:
+            raise ValueError('Unknown device_type: %d' % device_type)
+        self.device_type = device_type
         # Make sure CircuitPython core is not claiming the device
         interface = 0
         if device.is_kernel_driver_active(interface):
@@ -174,12 +191,14 @@ class Gamepad:
         # Set configuration
         device.set_configuration()
         # Initialize gamepad (set LEDs, drain buffer, etc)
-        if gamepad_type == DINPUT:
+        if device_type == DINPUT:
             self.init_dinput()
-        elif gamepad_type == XINPUT:
+        elif device_type == XINPUT:
             self.init_xinput()
+        elif device_type == OTHER:
+            logger.error("TODO: divide OTHER into Switch/kbd/mouse/generic/etc")
         else:
-            raise ValueError('Unknown gamepad_type: %d' % gamepad_type)
+            raise ValueError('Unknown device_type: %d' % device_type)
 
     def init_dinput(self):
         # Prepare DInput gamepad for use.
@@ -219,6 +238,9 @@ class Gamepad:
         #  bytes 12,13:  RY right stick Y axis (int16)   [ignored]
         #  bytes 14..19: ???, but they don't change
         #
+        if self.device_type != XINPUT:
+            # TODO: deal with the other device types
+            return (True, False, None)
         if self.device is None:
             # caller is trying to poll when gamepad is not connected
             return (False, False, None)

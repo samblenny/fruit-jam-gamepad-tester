@@ -274,8 +274,15 @@ class Descriptor:
         # Return tuble with USB device vendor and product IDs
         return (self.idVendor, self.idProduct)
 
-    def class_subclass_protocol(self):
+    def dev_class_subclass_protocol(self):
         return (self.bDeviceClass, self.bDeviceSubClass, self.bDeviceProtocol)
+
+    def int0_class_subclass_protocol(self):
+        if len(self.interfaces) < 1:
+            return (None, None, None)
+        i0 = self.interfaces[0]
+        return (i0.bInterfaceClass, i0.bInterfaceSubClass,
+            i0.bInterfaceProtocol)
 
     def read_configuration(self, device):
         # Read and parse USB configuration descriptor

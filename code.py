@@ -19,7 +19,7 @@ import adafruit_imageload
 import adafruit_logging as logging
 
 from gamepad import (
-    find_gamepad_device, Gamepad,
+    find_usb_device, InputDevice,
     UP, DOWN, LEFT, RIGHT, START, SELECT, L, R, A, B, X, Y)
 
 
@@ -170,35 +170,45 @@ def main():
             # The point of device_cache is to avoid repeatedly checking the
             # same non-gamepad device once it's been identified as something
             # other than a gamepad.
-            result = find_gamepad_device(device_cache)
-            if result is None:
+            scan_result = find_usb_device(device_cache)
+            if scan_result is None:
                 # No connection yet, so sleep briefly then try the find again
                 sleep(0.4)
                 continue
-            (device, type_, vid, pid, class_, subclass, protocol) = result
-            # Found a gamepad, so configure it and start polling
+            # Found an input device, so try to configure it and start polling
             logger.info("Found device. Connecting... (button 1 to rescan bus)")
             # CAUTION! Allowing a display refresh between the calls to
             # usb.core.find() and usb.core.Device.set_configuration() may
             # cause unpredictable behavior.
-            player = 1
-            gp = Gamepad(device, type_, player)
+            sr = scan_result
+            vid_pid = (sr.vid, sr.pid)
+            dev_info = sr.dev_info
+            int0_info = sr.int0_info
+            input_dev = InputDevice(sr.device, sr.dev_type, player=1)
+            composite = (sr.dev_info == (0x00, 0x00, 0x00))
             tag = ''
-            if (vid, pid) == (0x045e, 0x028e):
+            if vid_pid == (0x045e, 0x028e):
                 tag = 'Xbox360'
-            elif (vid, pid) == (0x057e, 0x2009):
+            elif vid_pid == (0x057e, 0x2009):
                 tag = 'SwitchPro'
-            elif (class_, subclass, protocol) == (0x00, 0x00, 0x00):
-                tag = 'Composite'
-            set_status(("%04X:%04X %s\nclass %02X\nsubclass %02X\nprotocol %02X"
-                "\n(button 1: rescan bus)") %
-                (vid, pid, tag, class_, subclass, protocol))
+            elif sr.int0_info == (0x03, 0x01, 0x01):
+                tag = 'Boot Keyboard'
+            elif sr.int0_info == (0x03, 0x01, 0x02):
+                tag = 'Boot Mouse'
+            elif sr.int0_info == (0x03, 0x00, 0x00):
+                tag = 'Composite HID'
+            fmt_args = vid_pid + (tag,) + dev_info + int0_info
+            set_status(("%04X:%04X %s\n"  # vid:pid tag
+                "dev  %02X:%02X:%02X\n"   # device class:subclass:protocol
+                "int0 %02X:%02X:%02X\n"   # interface 0 class:subclass:proto.
+                "(button 1: rescan bus)") %
+                fmt_args)
             connected = True
             prev = 0
             print_bits(prev)
             while connected and button_1.value:
                 try:
-                    (connected, changed, buttons) = gp.poll()
+                    (connected, changed, buttons) = input_dev.poll()
                     if connected and changed:
                         update_GUI(scene, prev, buttons, status)
                         display.refresh()
