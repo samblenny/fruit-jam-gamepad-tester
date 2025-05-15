@@ -270,6 +270,13 @@ class Descriptor:
         self.configs = []
         self.interfaces = []
 
+    def vid_pid(self):
+        # Return tuble with USB device vendor and product IDs
+        return (self.idVendor, self.idProduct)
+
+    def class_subclass_protocol(self):
+        return (self.bDeviceClass, self.bDeviceSubClass, self.bDeviceProtocol)
+
     def read_configuration(self, device):
         # Read and parse USB configuration descriptor
         # - device: usb.core.Device

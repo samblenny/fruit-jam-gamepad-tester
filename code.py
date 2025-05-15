@@ -9,10 +9,12 @@ from framebufferio import FramebufferDisplay
 import gc
 from picodvi import Framebuffer
 import supervisor
+from terminalio import FONT
 from time import sleep
 from usb.core import USBError, USBTimeoutError
 import usb_host
 
+from adafruit_display_text import bitmap_label
 import adafruit_imageload
 import adafruit_logging as logging
 
@@ -28,7 +30,7 @@ logger.setLevel(logging.DEBUG)
 BUTTON_DEBUG = const(True)
 
 
-def update_GUI(scene, prev, buttons):
+def update_GUI(scene, prev, buttons, status):
     # Update TileGrid sprites to reflect changed state of gamepad buttons
     # Scene is 10 sprites wide by 5 sprites tall:
     #  Y
@@ -39,6 +41,7 @@ def update_GUI(scene, prev, buttons):
     #  4 . . . . . . . . . .
     #    0 1 2 3 4 5 6 7 8 9 X
     #
+    x, y = status.anchored_position
     diff = prev ^  buttons
     if diff & A:
         scene[8, 2] = 15 if (buttons & A) else 17
@@ -53,19 +56,48 @@ def update_GUI(scene, prev, buttons):
     if diff & R:
         scene[8, 0] = 1 if (buttons & R) else 5
     if diff & UP:
-        scene[2, 1] = 8 if (buttons & UP) else 12
+        if buttons & UP:
+            scene[2, 1] = 8
+            if buttons & B:
+                # B + UP: move status label up
+                y = max(0, y-2)
+                logger.info('x: %d, y: %d' % (x, y))
+        else:
+            scene[2, 1] = 12
     if diff & DOWN:
-        scene[2, 3] = 22 if (buttons & DOWN) else 26
+        if buttons & DOWN:
+            scene[2, 3] = 22
+            if buttons & B:
+                # B + DOWN: move status label down
+                y = min(120, y+2)
+                logger.info('x: %d, y: %d' % (x, y))
+        else:
+            scene[2, 3] = 26
     if diff & LEFT:
-        scene[1, 2] = 14 if (buttons & LEFT) else 18
+        if buttons & LEFT:
+            scene[1, 2] = 14
+            if buttons & B:
+                # B + LEFT: move status label left
+                x = max(0, x-2)
+                logger.info('x: %d, y: %d' % (x, y))
+        else:
+            scene[1, 2] = 18
     if diff & RIGHT:
-        scene[3, 2] = 16 if (buttons & RIGHT) else 20
+        if buttons & RIGHT:
+            scene[3, 2] = 16
+            if buttons & B:
+                # B + RIGHT: move status label right
+                x = min(160, x+2)
+                logger.info('x: %d, y: %d' % (x, y))
+        else:
+            scene[3, 2] = 20
     if diff & SELECT:
         scene[4, 3] = 10 if (buttons & SELECT) else 24
     if diff & START:
         scene[5, 3] = 11 if (buttons & START) else 25
     if BUTTON_DEBUG:
         print_bits(buttons)
+    status.anchored_position = x, y
 
 def print_bits(buttons):
     # Print binary representation of the buttton state bitfield
@@ -96,7 +128,7 @@ def main():
         palette=Palette)
     # assemble TileGrid with gamepad using sprites from the spritesheet
     scene = TileGrid(bitmap, pixel_shader=palette, width=10, height=5,
-        tile_width=8, tile_height=8, default_tile=9, x=13, y=5)
+        tile_width=8, tile_height=8, default_tile=9, x=8, y=8)
     tilemap = (
         (0, 5, 2, 3, 3, 3, 3, 4, 5, 6),            # . L . . . . . . R .
         (7, 9, 12, 9, 9, 9, 9, 17, 9, 13),         # . . dU. . . . X . .
@@ -107,26 +139,29 @@ def main():
     for (y, row) in enumerate(tilemap):
         for (x, sprite) in enumerate(row):
             scene[x, y] = sprite
-    grp = Group(scale=3)  # 3x zoom
+    grp = Group(scale=2)  # 2x zoom
     grp.append(scene)
     display.root_group = grp
-    display.refresh()
+
+    # Make a text label for status messages
+    status = bitmap_label.Label(FONT, text="", color=0xFFFFFF, scale=1)
+    status.line_spacing = 1.0
+    status.anchor_point = (0, 0)
+    status.anchored_position = (8, 54)
+    grp.append(status)
 
     # Configure button #1 as input to trigger USB bus re-connect
     button_1 = DigitalInOut(BUTTON1)
 
-# =============================
-# == TODO: REMOVE THIS ========
-# =============================
-    import usb_descriptor
-    usb_descriptor.test_hid_report_descriptor_parser()
-    print()
-# =============================
-
+    # Define status updater with access to local vars from main()
+    def set_status(msg):
+        logger.info(msg)
+        status.text = msg
+        display.refresh()
 
     # MAIN EVENT LOOP
     # Establish and maintain a gamepad connection
-    logger.info("Looking for USB gamepad...")
+    set_status("Scanning USB bus...")
     device_cache = {}
     while True:
         gc.collect()
@@ -135,46 +170,58 @@ def main():
             # The point of device_cache is to avoid repeatedly checking the
             # same non-gamepad device once it's been identified as something
             # other than a gamepad.
-            (device, gamepad_type) = find_gamepad_device(device_cache)
-            if device and gamepad_type:
-                # Found a gamepad, so configure it and start polling
-                logger.info("Found device. Connecting...")
-                logger.info("  (to rescan USB bus, press Button #1)")
-                player = 1
-                gp = Gamepad(device, gamepad_type, player)
-                logger.debug("Connected")
-                connected = True
-                prev = 0
-                print_bits(prev)
-                while connected and button_1.value:
-                    try:
-                        (connected, changed, buttons) = gp.poll()
-                        if connected and changed:
-                            update_GUI(scene, prev, buttons)
-                            display.refresh()
-                            prev = buttons
-                    except USBTimeoutError:
-                        # Intentionally ignore timeouts because currently there
-                        # is no good way to distinguish between a normal timeout
-                        # and the device being unplugged. So, rely on button #1
-                        # to manually re-scan the USB bus.
-                        pass
-                # If loop stopped, gamepad connection was lost or somebody
-                # pressed button #1 to request a USB bus re-scan. We need to
-                # flush the line with a LF to clean up after print_bits()
-                print()
-                logger.info("Gamepad disconnected. Looking for gamepad...")
-                device_cache = {}
-            else:
-                # No connection yet, so sleep briefly then try again
+            result = find_gamepad_device(device_cache)
+            if result is None:
+                # No connection yet, so sleep briefly then try the find again
                 sleep(0.4)
+                continue
+            (device, type_, vid, pid, class_, subclass, protocol) = result
+            # Found a gamepad, so configure it and start polling
+            logger.info("Found device. Connecting... (button 1 to rescan bus)")
+            # CAUTION! Allowing a display refresh between the calls to
+            # usb.core.find() and usb.core.Device.set_configuration() may
+            # cause unpredictable behavior.
+            player = 1
+            gp = Gamepad(device, type_, player)
+            tag = ''
+            if (vid, pid) == (0x045e, 0x028e):
+                tag = 'Xbox360'
+            elif (vid, pid) == (0x057e, 0x2009):
+                tag = 'SwitchPro'
+            elif (class_, subclass, protocol) == (0x00, 0x00, 0x00):
+                tag = 'Composite'
+            set_status(("%04X:%04X %s\nclass %02X\nsubclass %02X\nprotocol %02X"
+                "\n(button 1: rescan bus)") %
+                (vid, pid, tag, class_, subclass, protocol))
+            connected = True
+            prev = 0
+            print_bits(prev)
+            while connected and button_1.value:
+                try:
+                    (connected, changed, buttons) = gp.poll()
+                    if connected and changed:
+                        update_GUI(scene, prev, buttons, status)
+                        display.refresh()
+                        prev = buttons
+                except USBTimeoutError:
+                    # Intentionally ignore timeouts because currently there
+                    # is no good way to distinguish between a normal timeout
+                    # and the device being unplugged. So, rely on button #1
+                    # to manually re-scan the USB bus.
+                    pass
+            # If loop stopped, gamepad connection was lost or somebody
+            # pressed button #1 to request a USB bus re-scan. We need to
+            # flush the line with a LF to clean up after print_bits()
+            print()
+            set_status("Device disconnected.\nScanning USB bus...")
+            device_cache = {}
         except USBError as e:
             # This might mean gamepad was unplugged, or maybe some other
             # low-level USB thing happened which this driver does not yet
             # know how to deal with. So, log the error and keep going
             print()  # clean up after print_bits()
             logger.error("USBError: '%s', %s, '%s'" % (e, type(e), e.errno))
-            logger.info("Gamepad connection error. Looking for gamepad...")
+            logger.info("USB error.\nScanning USB bus...")
             device_cache = {}
 
 

@@ -51,7 +51,9 @@ XINPUT = const(2)
 def find_gamepad_device(device_cache):
     # Find a USB wired gamepad by inspecting usb device descriptors
     # - device_cache: dictionary of previously checked device descriptors
-    # - return: (usb.core.Device, gamepad_type constant) or (None, None)
+    # - return: tuple with (usb.core.Device, gamepad_type constant, idVendor,
+    #   idProduct, bDeviceClass, bDeviceSubClass, bDeviceProtocol) for success,
+    #   or None for failure.
     # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
     #
     for device in core.find(find_all=True):
@@ -65,16 +67,18 @@ def find_gamepad_device(device_cache):
                 # avoid repeatedly spewing log output about devices that are
                 # not interesting (e.g. want a gamepad but found a keyboard)
                 logger.debug("Ignoring cached device")
-                return (None, None)
+                return None
             # Remember this device to avoid repeatedly checking it later
             device_cache[k] = True
             # Read and parse the device's configuration descriptor
             desc.read_configuration(device)
+            vid, pid = desc.vid_pid()
+            class_, subclass, protocol = desc.class_subclass_protocol()
             logger.info(desc)
             if is_xinput_gamepad(desc):
-                return (device, XINPUT)
+                return (device, XINPUT, vid, pid, class_, subclass, protocol)
             elif is_dinput_gamepad(desc):
-                return (device, DINPUT)
+                return (device, DINPUT, vid, pid, class_, subclass, protocol)
         except ValueError as e:
             # This happens for errors during descriptor parsing
             logger.error(e)
@@ -83,7 +87,7 @@ def find_gamepad_device(device_cache):
             # USBError can happen when device first connects
             logger.error("USBError: '%s', %s, '%s'" % (e, type(e), e.errno))
             pass
-    return (None, None)
+    return None
 
 def is_dinput_gamepad(descriptor):
     # Return True if descriptor details match pattern for an DInput gamepad
@@ -180,7 +184,7 @@ class Gamepad:
     def init_dinput(self):
         # Prepare DInput gamepad for use.
         logger.info('Initializing DInput gamepad')
-        raise ValueError("TODO: IMPLEMENT DINPUT SUPPORT")
+        logger.error("TODO: IMPLEMENT DINPUT SUPPORT")
 
     def init_xinput(self):
         # Prepare XInput gamepad for use.
