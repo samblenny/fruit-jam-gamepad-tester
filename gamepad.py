@@ -470,7 +470,7 @@ class InputDevice:
                 # This is normal. Timeouts happen fairly often.
                 yield None
             except USBError as e:
-                # This may happen when device is unplugfed (or might time out)
+                # This may happen when device is unplugged (or might time out)
                 raise e
 
     def xinput_event_generator(self):
