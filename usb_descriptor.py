@@ -288,6 +288,28 @@ class Descriptor:
                     i.bInterfaceProtocol)
         return (None, None, None)
 
+    def int0_output_endpoints(self):
+        # Return list of output endpoints for interface 0
+        arr = []
+        input_mask = 0x80
+        for i in self.interfaces:
+            if i.bInterfaceNumber == 0:
+                for e in i.endpoint:
+                    if not (e.bEndpointAddress & input_mask):
+                        arr.append(e)
+        return arr
+
+    def int0_input_endpoints(self):
+        # Return list of input endpoints for interface 0
+        arr = []
+        input_mask = 0x80
+        for i in self.interfaces:
+            if i.bInterfaceNumber == 0:
+                for e in i.endpoint:
+                    if (e.bEndpointAddress & input_mask):
+                        arr.append(e)
+        return arr
+
     def read_configuration(self, device):
         # Read and parse USB configuration descriptor
         # - device: usb.core.Device

@@ -79,6 +79,8 @@ def find_usb_device(device_cache):
             vid, pid = desc.vid_pid()
             dev_info = desc.dev_class_subclass_protocol()
             int0_info = desc.int0_class_subclass_protocol()
+            int0_outs = desc.int0_output_endpoints()
+            int0_ins = desc.int0_input_endpoints()
             logger.info(desc)
             dev_type = TYPE_OTHER
             tag = ''
@@ -101,7 +103,7 @@ def find_usb_device(device_cache):
                 dev_type = TYPE_HID
                 tag = 'HID'
             return ScanResult(device, dev_type, vid, pid, tag,
-                dev_info, int0_info)
+                dev_info, int0_info, int0_outs, int0_ins)
         except ValueError as e:
             # This happens for errors during descriptor parsing
             logger.error(e)
@@ -114,7 +116,9 @@ def find_usb_device(device_cache):
 
 
 class ScanResult:
-    def __init__(self, device, dev_type, vid, pid, tag, dev_info, int0_info):
+    def __init__(self, device, dev_type, vid, pid, tag, dev_info, int0_info,
+        int0_outs, int0_ins
+        ):
         if len(dev_info) != 3:
             raise ValueError("Expected (class,subclass,protocol) for dev_info")
         if len(int0_info) != 3:
@@ -126,6 +130,8 @@ class ScanResult:
         self.tag = tag
         self.dev_info = dev_info
         self.int0_info = int0_info
+        self.int0_outs = int0_outs
+        self.int0_ins = int0_ins
 
 
 def is_hid_gamepad(descriptor):
@@ -229,10 +235,24 @@ class InputDevice:
             device.detach_kernel_driver(interface)
         # Set configuration
         device.set_configuration()
+        # Figure out which endpoints to use
+        sr = scan_result
+        endpoint_in  = None if (len(sr.int0_ins ) < 1) else sr.int0_ins[0]
+        endpoint_out = None if (len(sr.int0_outs) < 1) else sr.int0_outs[0]
+        logger.info('INT0 IN: %s' % endpoint_in)
+        logger.info('INT0 OUT: %s' % endpoint_out)
+        self.int0_endpoint_in = endpoint_in
+        self.int0_endpoint_out = endpoint_out
         # Initialize USB device if needed (e.g. handshake or set gamepad LEDs)
         if dev_type == TYPE_SWITCH_PRO:
+            # Make sure interface 0 has endpoints for handshake and reading
+            if self.int0_endpoint_in is None or self.int0_endpoint_out is None:
+                raise ValueError("Interface 0 descriptor is missing endpoints")
             logger.error("TODO: IMPLEMENT SWITCH PRO HANDSHAKE")
         elif dev_type == TYPE_XINPUT:
+            # Make sure interface 0 has endpoints for handshake and reading
+            if self.int0_endpoint_in is None or self.int0_endpoint_out is None:
+                raise ValueError("Interface 0 descriptor is missing endpoints")
             self.init_xinput()
         elif dev_type == TYPE_BOOT_MOUSE:
             # TODO: maybe implement something for this. maybe.
@@ -243,6 +263,9 @@ class InputDevice:
         elif dev_type == TYPE_HID_GAMEPAD:
             # This covers PC style "DirectInput" or "DInput" along with other
             # types of generic HID gamepads (e.g. non-Pro Switch controllers)
+            # Make sure interface 0 has endpoint for reading
+            if self.int0_endpoint_in is None:
+                raise ValueError("Interface 0 descriptor is missing endpoint")
             self.init_hid_gamepad()
         elif dev_type == TYPE_HID:
             # TODO: maybe dump some HID descriptor info?

@@ -195,7 +195,7 @@ def main():
             # Poll for input events until Button #1 is pressed or until there
             # is a USB error.
             need_LF = False
-            prev = 0 & 0xffff      # previous input e state
+            prev = 0 & 0xffff      # previous input event state
             for buttons in dev.input_event_generator():
                 if not button_1.value:
                     # End polling if Fruit Jam board's Button #1 was pressed
@@ -207,13 +207,14 @@ def main():
                 diff = prev ^ buttons   # Use bitwise XOR to find any changes
                 prev = buttons
                 if diff or (not need_LF):
+                    # Only update GUI when something actually changed
                     update_GUI(scene, buttons, diff, status)
                     print_bits(buttons)  # NOTE: uses print(..., end='')
                     need_LF = True
                     display.refresh()
             # Loop stops if somebody pressed button #1 asking for a re-scan
-            # Clean up after print_bits()
             if need_LF:
+                # Clean up after print_bits()
                 print()
             logger.info("=== BUTTON 1 PRESSED ===")
             set_status("Scanning USB bus...")
