@@ -273,10 +273,8 @@ class InputDevice:
     def input_event_generator(self):
         # This is a generator that makes an iterable for reading input events.
         # - returns: iterable that can be used with a for loop
-        # - yields: (buttons, diff) where buttons is a bitfield of current
-        #   button state and diff is a bitfield of buttons that changed since
-        #   the last polling of the input device. In case of a timeout error,
-        #   yield value is (None, None).
+        # - yields: uint16 bitfield of current button state. In case of read
+        #   timeout or timer throttle, yield value is None.
         # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
         #
         # This allows calling code to use a for loop to read a stream of input
@@ -303,16 +301,15 @@ class InputDevice:
 
     def generator_of_nothingness(self):
         # Generator function to do nothing in a particular formalized way
+        # - yields: None
         while True:
             yield None
 
     def xinput_event_generator(self):
         # This is a generator that makes an iterable for reading XInput events.
         # - returns: iterable that can be used with a for loop
-        # - yields: (buttons, diff) where buttons is a bitfield of current
-        #   button state and diff is a bitfield of buttons that changed since
-        #   the last polling of the input device. In case of a timeout error,
-        #   yield value is None.
+        # - yields: uint16 bitfield of current button state. In case of read
+        #   timeout or timer throttle, yield value is None.
         # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
         #
         # Expected endpoint 0x81 report format:
@@ -328,7 +325,6 @@ class InputDevice:
         #
         endpoint = 0x81
         interval = 8
-        prev = 0
         data = self.buf64  # caching buffer reference avoids dictionary lookups
         delay = 0
         delta_ms = elapsed_ms_generator()  # call generator to make iterator
@@ -346,9 +342,7 @@ class InputDevice:
                 # ignoring sticks and triggers
                 self.device.read(endpoint, data, timeout=interval)
                 (buttons,) = unpack_from('<H', data, 2)
-                diff = buttons ^ prev
-                prev = buttons
-                yield (buttons, diff)
+                yield buttons
             except USBTimeoutError as e:
                 # This is normal. Timeouts happen fairly often. But, this
                 # also sometimes happens when USB device is unplugged.

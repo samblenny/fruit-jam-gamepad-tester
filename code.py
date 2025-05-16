@@ -178,7 +178,7 @@ def main():
                 sleep(0.4)
                 continue
             # Found an input device, so try to configure it and start polling
-            logger.info("Found device. Connecting... (button 1 to rescan bus)")
+            logger.info("Found device. Connecting...")
             # CAUTION! Allowing a display refresh between the calls to
             # usb.core.find() and usb.core.Device.set_configuration() may
             # cause unpredictable behavior.
@@ -195,24 +195,27 @@ def main():
             # Poll for input events until Button #1 is pressed or until there
             # is a USB error.
             need_LF = False
-            for btns_diff in dev.input_event_generator():
+            prev = 0 & 0xffff      # previous input e state
+            for buttons in dev.input_event_generator():
                 if not button_1.value:
-                    # End polling if Button #1 pressed
-                    logger.info("=== BUTTON 1 PRESSED ===")
+                    # End polling if Fruit Jam board's Button #1 was pressed
                     break
-                if btns_diff is None:
-                    # This can happen for a timeout or if the polling interval
-                    # for the active endpoint has not elapsed yet
+                if buttons is None:
+                    # This means request was throttled or USB read timed out.
+                    # both are normal and fine. Just try again.
                     continue
-                (buttons, diff) = btns_diff
-                update_GUI(scene, buttons, diff, status)
-                print_bits(buttons)  # NOTE: uses print(..., end='')
-                need_LF = True
-                display.refresh()
+                diff = prev ^ buttons   # Use bitwise XOR to find any changes
+                prev = buttons
+                if diff or (not need_LF):
+                    update_GUI(scene, buttons, diff, status)
+                    print_bits(buttons)  # NOTE: uses print(..., end='')
+                    need_LF = True
+                    display.refresh()
             # Loop stops if somebody pressed button #1 asking for a re-scan
             # Clean up after print_bits()
             if need_LF:
                 print()
+            logger.info("=== BUTTON 1 PRESSED ===")
             set_status("Scanning USB bus...")
             display.refresh()
             device_cache = {}
