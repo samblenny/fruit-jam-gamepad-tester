@@ -1,18 +1,33 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright 2025 Sam Blenny
 #
-# Gamepad driver for DInput or XInput compatible USB wired gamepads
+# Gamepad driver for XInput (Xbox360 compatible), DInput (generic HID), or
+# Nintendo Switch Pro Controller compatible USB wired gamepads.
 #
-# The button names used here match the Nintendo SNES style button
-# cluster layout, but the USB IDs and protocol match the Xbox 360 USB
-# wired controller. This is meant to work with widely available USB
-# wired xinput compatible gamepads for the retrogaming market. In
-# particular, I tested this package using my 8BitDo SN30 Pro USB wired
-# gamepad.
+# This also does:
+# - Device type detection and reporting for USB HID devices, including mice and
+#   keyboards, to the extent that it's useful for telling them apart from HID
+#   game controller devices
+# - USB device, configuration, and HID report descriptor parsing to help with
+#   device type detection and with understanding details of unfamiliar devices
+#
+# The button names used here match the Nintendo SNES style button cluster
+# layout (A on the right). This is meant to work with some of the widely
+# available USB wired xinput compatible gamepads, with an emphasis on
+# inexpensive controllers for the retrogaming market.
+#
+# Support for XInput gamepads from 8BitDo is currently the most robust because
+# that's what I use for my primary testing. Switch Pro compatible doesn't work
+# yet. Generic HID (DInput) doesn't work yet. By the time you read this, that
+# implementation status report may not be accurate, depending on whether I
+# remember to update this comment.
 #
 # Related docs:
 # - https://docs.circuitpython.org/projects/logging/en/latest/api.html
 # - https://learn.adafruit.com/a-logger-for-circuitpython/overview
+# - https://docs.python.org/3/glossary.html#term-generator
+# - https://docs.python.org/3/glossary.html#term-iterable
+# - https://docs.micropython.org/en/latest/reference/speed_python.html
 #
 from micropython import const
 from struct import unpack, unpack_from
@@ -405,7 +420,7 @@ class InputDevice:
         data = bytearray(max_packet)
         delay = 0
         delta_ms = elapsed_ms_generator()  # call generator to make iterator
-        dev_read = self.device.read  # cache funtion to avoid dictionary lookups
+        dev_read = self.device.read  # cache function to avoid dictionary lookups
         # Start polling for input.
         # NOTE: To understand what this does, you need to understand the Python
         # concepts of generator functions, iterators, and generators. The point
@@ -444,7 +459,7 @@ class InputDevice:
         data_mv = memoryview(data)  # use memoryview to reduce heap allocations
         delay = 0
         delta_ms = elapsed_ms_generator()  # call generator to make iterator
-        dev_read = self.device.read  # cache funtion to avoid dictionary lookups
+        dev_read = self.device.read  # cache function to avoid dictionary lookups
         # Start polling for input.
         # NOTE: To understand what this does, you need to understand the Python
         # concepts of generator functions, iterators, and generators. The point
@@ -498,7 +513,7 @@ class InputDevice:
         data = bytearray(max_packet)
         delay = 0
         delta_ms = elapsed_ms_generator()  # call generator to make iterator
-        dev_read = self.device.read  # cache funtion to avoid dictionary lookups
+        dev_read = self.device.read  # cache function to avoid dictionary lookups
         # Start polling for input.
         # NOTE: To understand what this does, you need to understand the Python
         # concepts of generator functions, iterators, and generators. The point
