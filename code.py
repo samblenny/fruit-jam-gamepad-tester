@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright 2024 Sam Blenny
 #
 from board import BUTTON1, CKP, CKN, D0P, D0N, D1P, D1N, D2P, D2N
-from digitalio import DigitalInOut
+from digitalio import DigitalInOut, Direction, Pull
 from displayio import (Bitmap, Group, OnDiskBitmap, Palette, TileGrid,
     release_displays)
 from framebufferio import FramebufferDisplay
@@ -29,7 +29,7 @@ logger = logging.getLogger('code.py')
 logger.setLevel(logging.DEBUG)
 
 
-def update_GUI(scene, prev, buttons, status):
+def update_GUI(scene, buttons, diff, status):
     # Update TileGrid sprites to reflect changed state of gamepad buttons
     # Scene is 10 sprites wide by 5 sprites tall:
     #  Y
@@ -41,7 +41,7 @@ def update_GUI(scene, prev, buttons, status):
     #    0 1 2 3 4 5 6 7 8 9 X
     #
     x, y = status.anchored_position
-    diff = prev ^  buttons
+    xy_changed = False
     if diff & A:
         scene[8, 2] = 15 if (buttons & A) else 17
     if diff & B:
@@ -60,7 +60,7 @@ def update_GUI(scene, prev, buttons, status):
             if buttons & B:
                 # B + UP: move status label up
                 y = max(0, y-2)
-                logger.info('x: %d, y: %d' % (x, y))
+                xy_changed = True
         else:
             scene[2, 1] = 12
     if diff & DOWN:
@@ -69,7 +69,7 @@ def update_GUI(scene, prev, buttons, status):
             if buttons & B:
                 # B + DOWN: move status label down
                 y = min(120, y+2)
-                logger.info('x: %d, y: %d' % (x, y))
+                xy_changed = True
         else:
             scene[2, 3] = 26
     if diff & LEFT:
@@ -78,7 +78,7 @@ def update_GUI(scene, prev, buttons, status):
             if buttons & B:
                 # B + LEFT: move status label left
                 x = max(0, x-2)
-                logger.info('x: %d, y: %d' % (x, y))
+                xy_changed = True
         else:
             scene[1, 2] = 18
     if diff & RIGHT:
@@ -87,13 +87,15 @@ def update_GUI(scene, prev, buttons, status):
             if buttons & B:
                 # B + RIGHT: move status label right
                 x = min(160, x+2)
-                logger.info('x: %d, y: %d' % (x, y))
+                xy_changed = True
         else:
             scene[3, 2] = 20
     if diff & SELECT:
         scene[4, 3] = 10 if (buttons & SELECT) else 24
     if diff & START:
         scene[5, 3] = 11 if (buttons & START) else 25
+    if xy_changed:
+        print(' x: %3d, y: %3d' % (x, y), end='')
     status.anchored_position = x, y
 
 def print_bits(buttons):
@@ -149,19 +151,22 @@ def main():
 
     # Configure button #1 as input to trigger USB bus re-connect
     button_1 = DigitalInOut(BUTTON1)
+    button_1.direction = Direction.INPUT
+    button_1.pull = Pull.UP
 
     # Define status updater with access to local vars from main()
     def set_status(msg):
-        logger.info(msg)
+        logger.info(msg.replace('\n', ' '))
         status.text = msg
-        display.refresh()
 
     # MAIN EVENT LOOP
     # Establish and maintain a gamepad connection
     set_status("Scanning USB bus...")
+    display.refresh()
     device_cache = {}
     while True:
         gc.collect()
+        sleep(0.1)
         need_LF = False
         try:
             # The point of device_cache is to avoid repeatedly checking the
@@ -185,77 +190,41 @@ def main():
                 "int0 %02X:%02X:%02X\n"   # interface 0 class:subclass:proto.
                 "(button 1: rescan bus)") %
                 fmt_args)
-            # Start polling for input. The button_1.value stuff is checking for
-            # Fruit Jam's Button #1. Pressing the button stops the loop which
-            # triggers a re-scan of the USB bus. Having a USB feature rely on
-            # manual re-scan is wierd, but since unplug detection is currently
-            # unreliable, it's helpful.
-            #
-            # The polling functions in the loops below intentionally ignore
-            # timeouts because currently there is no good way to distinguish
-            # between a normal timeout and the device being unplugged.
-            connected = True
-            prev = 0
-            dev_type = sr.dev_type
+            display.refresh()
 
-            # POLL SWITCH PRO
-            if dev_type == TYPE_SWITCH_PRO:
-                while connected and button_1.value:
-                    result = None
-                    try:
-                        (connected, changed, buttons) = dev.poll_switch()
-                        if connected and changed:
-                            update_GUI(scene, prev, buttons, status)
-                            display.refresh()
-                            prev = buttons
-                    except USBTimeoutError:
-                        pass
-
-            # POLL XINPUT
-            elif dev_type == TYPE_XINPUT:
-                print_bits(prev)
-                while connected and button_1.value:
-                    result = None
-                    try:
-                        (connected, changed, buttons) = dev.poll_xinput()
-                        if connected and changed:
-                            update_GUI(scene, prev, buttons, status)
-                            print_bits(buttons)  # NOTE: uses print(..., end='')
-                            display.refresh()
-                            prev = buttons
-                    except USBTimeoutError:
-                        pass
-                # start new line to clean up after print_bits()
+            # Poll for input events until Button #1 is pressed or until there
+            # is a USB error.
+            need_LF = False
+            for btns_diff in dev.input_event_generator():
+                if not button_1.value:
+                    # End polling if Button #1 pressed
+                    logger.info("=== BUTTON 1 PRESSED ===")
+                    break
+                if btns_diff is None:
+                    # This can happen for a timeout or if the polling interval
+                    # for the active endpoint has not elapsed yet
+                    continue
+                (buttons, diff) = btns_diff
+                update_GUI(scene, buttons, diff, status)
+                print_bits(buttons)  # NOTE: uses print(..., end='')
+                need_LF = True
+                display.refresh()
+            # Loop stops if somebody pressed button #1 asking for a re-scan
+            # Clean up after print_bits()
+            if need_LF:
                 print()
-
-            # POLL GENERIC HID GAMEPAD
-            elif dev_type == TYPE_HID_GAMEPAD:
-                while connected and button_1.value:
-                    result = None
-                    try:
-                        (connected, changed, buttons) = dev.poll_hid_gamepad()
-                        if connected and changed:
-                            update_GUI(scene, prev, buttons, status)
-                            display.refresh()
-                            prev = buttons
-                    except USBTimeoutError:
-                        pass
-
-            # For now, don't poll for the other device types
-            else:
-                while button_1.value:
-                    sleep(0.1)
-            # If loop stopped, gamepad connection was lost or somebody
-            # pressed button #1 to request a USB bus re-scan.
-            set_status("Device disconnected.\nScanning USB bus...")
+            set_status("Scanning USB bus...")
+            display.refresh()
             device_cache = {}
         except USBError as e:
-            # This might mean gamepad was unplugged, or maybe some other
-            # low-level USB thing happened which this driver does not yet
-            # know how to deal with. So, log the error and keep going
-            print()  # clean up after print_bits()
+            # This happens sometimes, but not always, when USB device is
+            # unplugged. Can also be caused by other low-level USB stuff. Log
+            # the error and stay in the loop to re-scan the USB bus.
+            if need_LF:
+                print()  # clean up after print_bits()
             logger.error("USBError: '%s', %s, '%s'" % (e, type(e), e.errno))
-            logger.info("USB error.\nScanning USB bus...")
+            set_status("Scanning USB bus...")
+            display.refresh()
             device_cache = {}
 
 

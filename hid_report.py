@@ -168,10 +168,10 @@ class HIDReportDesc:
                 item_data = data[cursor+1]
             elif size == 2:
                 # little endian uint16
-                item_data = unpack_from('<H', data, cursor+1)[0]
+                (item_data,) = unpack_from('<H', data, cursor+1)
             elif size == 3:
                 # little endian uint32
-                item_data = unpack_from('<I', data, cursor+1)[0]
+                (item_data,) = unpack_from('<I', data, cursor+1)
             self.parse_item(tag_type, size, item_data)
             cursor = next_cursor
             if cursor == limit:

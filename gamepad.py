@@ -14,10 +14,11 @@
 # - https://docs.circuitpython.org/projects/logging/en/latest/api.html
 # - https://learn.adafruit.com/a-logger-for-circuitpython/overview
 #
-from struct import unpack
+from micropython import const
+from struct import unpack, unpack_from
+from supervisor import ticks_ms
 from usb import core
 from usb.core import USBError, USBTimeoutError
-from micropython import const
 
 import adafruit_logging as logging
 
@@ -182,6 +183,29 @@ def set_xinput_led(device, player):
     # write(endpoint, data, timeout)
     device.write(0x02, report, 100)
 
+def elapsed_ms_generator():
+    # This can be used to measure time intervals efficiently.
+    # - returns: an iterator
+    # - iterator yields: ms since last call to next(iterator)
+    #
+    # Technically speaking, this is a generator function that returns an
+    # iterator. The iterator is a generator. The generator yields a time
+    # interval in milliseconds each time next() is called on the iterator. The
+    # interval is the elapsed time between the current and previous iterations.
+    #
+    # This is intended to help throttle USB device access to avoid tying the
+    # CPU up with too much interrupt handling or irritating the USB device by
+    # polling it too frequently.
+    #
+    ms = ticks_ms      # caching function ref avoids dictionary lookups
+    mask = 0x3fffffff  # (2**29)-1 because ticks_ms rolls over at 2**29
+    t0 = ms()
+    while True:
+        t1 = ms()
+        delta = (t1 - t0) & mask
+        t0 = t1
+        yield delta
+
 
 class InputDevice:
     def __init__(self, scan_result, player=1):
@@ -246,18 +270,49 @@ class InputDevice:
             pass
         set_xinput_led(self.device, self.player)
 
-    def poll_switch(self):
-        # Poll Switch Pro gamepad for button changes
-        # TODO: IMPLEMENT THIS
-        return (True, False, None)
-
-    def poll_xinput(self):
-        # Poll xinput gamepad for button changes (ignore sticks and triggers)
+    def input_event_generator(self):
+        # This is a generator that makes an iterable for reading input events.
+        # - returns: iterable that can be used with a for loop
+        # - yields: (buttons, diff) where buttons is a bitfield of current
+        #   button state and diff is a bitfield of buttons that changed since
+        #   the last polling of the input device. In case of a timeout error,
+        #   yield value is (None, None).
+        # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
         #
-        # Returns a tuple of (valid, changed, buttons):
-        #   connected: True if gamepad is still connected, else False
-        #   changed: True if buttons changed since last call, else False
-        #   buttons: Uint16 containing bitfield of individual button values
+        # This allows calling code to use a for loop to read a stream of input
+        # events from a USB device without having to worry about which backend
+        # driver is creating the events. The main advantage of this approach is
+        # that it it uses CPU and memory efficiently by avoiding many heap
+        # allocations and dictionary lookups that other methods would require.
+        #
+        # Related Docs:
+        # - https://docs.python.org/3/glossary.html#term-generator
+        # - https://docs.python.org/3/glossary.html#term-iterable
+        #
+        if self.device is None:
+            # caller is trying to poll when device is not connected
+            pass
+        elif self.dev_type == TYPE_SWITCH_PRO:
+            pass
+        elif self.dev_type == TYPE_XINPUT:
+            return self.xinput_event_generator()
+        elif self.dev_type == TYPE_HID_GAMEPAD:
+            pass
+        # Default fallback generator: do nothing forever
+        return self.generator_of_nothingness()
+
+    def generator_of_nothingness(self):
+        # Generator function to do nothing in a particular formalized way
+        while True:
+            yield None
+
+    def xinput_event_generator(self):
+        # This is a generator that makes an iterable for reading XInput events.
+        # - returns: iterable that can be used with a for loop
+        # - yields: (buttons, diff) where buttons is a bitfield of current
+        #   button state and diff is a bitfield of buttons that changed since
+        #   the last polling of the input device. In case of a timeout error,
+        #   yield value is None.
         # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
         #
         # Expected endpoint 0x81 report format:
@@ -271,47 +326,33 @@ class InputDevice:
         #  bytes 12,13:  RY right stick Y axis (int16)   [ignored]
         #  bytes 14..19: ???, but they don't change
         #
-        if self.dev_type != TYPE_XINPUT:
-            # TODO: deal with the other device types
-            return (True, False, None)
-        if self.device is None:
-            # caller is trying to poll when gamepad is not connected
-            return (False, False, None)
         endpoint = 0x81
-        timeout_ms = 5
-        try:
-            # Poll gamepad endpoint to get button and joystick status bytes
-            n = self.device.read(endpoint, self.buf64, timeout=timeout_ms)
-            if n < 14:
-                # skip unexpected responses (too short to be a full report)
-                return (True, False, None)
-            # Only bytes 2 and 3 are interesting (ignore sticks/triggers)
-            (buttons,) = unpack('<H', self.buf64[2:4])
-            if buttons != self._prev:
-                # button state has changed since previous polling
-                self._prev = buttons
-                return (True, True, buttons)
+        interval = 8
+        prev = 0
+        data = self.buf64  # caching buffer reference avoids dictionary lookups
+        delay = 0
+        delta_ms = elapsed_ms_generator()  # call generator to make iterator
+        while True:
+            # Respect the USB device's polling interval
+            delay += next(delta_ms)
+            if delay < interval:
+                yield None
+                continue
             else:
-                # button state is the same as it was last time
-                return (True, False, buttons)
-        except USBTimeoutError as e:
-            # This sometimes happens when the device is unplugged. It can also
-            # happen under normal conditions. For example, I have a wireless
-            # gamepad that, even when connected by USB-C cable, will start
-            # timing out after a short time with no button presses. But, it
-            # starts responding as soon as you press a button. I'm not aware of
-            # a way to distinguish between the device being unplugged and just
-            # a normal timeout. So, for now, just treat both the same.
-            #
-            # TODO: After the next TinyUSB update, perhaps re-consider if this
-            #       should be treated as the device having been unplugged
-            raise e
-        except USBError as e:
-            # TODO: After the next TinyUSB update, perhaps re-consider if this
-            #       should be treated as the device having been unplugged
-            raise e
-
-    def poll_hid_gamepad(self):
-        # Poll generic HID gamepad for button changes (also works for DInput)
-        # TODO: IMPLEMENT THIS
-        return (True, False, None)
+                delay = 0
+            # Okay, now enough time has passed, so poll the endpoint
+            try:
+                # Poll gamepad endpoint and extract only the button state,
+                # ignoring sticks and triggers
+                self.device.read(endpoint, data, timeout=interval)
+                (buttons,) = unpack_from('<H', data, 2)
+                diff = buttons ^ prev
+                prev = buttons
+                yield (buttons, diff)
+            except USBTimeoutError as e:
+                # This is normal. Timeouts happen fairly often. But, this
+                # also sometimes happens when USB device is unplugged.
+                yield None
+            except USBError as e:
+                # This sometimes happens when device is unpluged
+                raise e
