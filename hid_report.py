@@ -131,8 +131,9 @@ def dump_desc(data, message=None, indent=1):
     elif isinstance(data, bytearray):
         # Wrap hexdump to fit in 80 columns
         bytes_per_line = (80 - indent) // 3
+        data_mv = memoryview(data)  # use memoryview to reduce heap allocations
         for offset in range(0, len(data), bytes_per_line):
-            chunk = data[offset:offset+bytes_per_line]
+            chunk = data_mv[offset:offset+bytes_per_line]
             arr.append((' ' * indent) + ' '.join(['%02x' % b for b in chunk]))
     else:
         logger.error("Unexpected dump_desc arg type %s" % type(data))

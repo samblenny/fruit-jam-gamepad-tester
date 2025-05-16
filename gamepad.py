@@ -209,7 +209,7 @@ def elapsed_ms_generator():
     t0 = ms()
     while True:
         t1 = ms()
-        delta = (t1 - t0) & mask
+        delta = (t1 - t0) & mask  # handle possible timer rollover gracefully
         t0 = t1
         yield delta
 
@@ -279,13 +279,17 @@ class InputDevice:
     def init_switch_pro_gamepad(self):
         # Prepare Switch Pro compatible gamepad for use.
         # Exceptions: may raise usb.core.USBError and usb.core.USBTimeoutError
+        #
+        # Control messages:
+        # - 0x80 0x01: get device type and mac address
+        # - 0x80 0x02: handshake
+        # - 0x80 0x03: use faster baud rate
+        # - 0x80 0x04: switch to USB HID mode with no timeout
+        #
         logger.info('Initializing SwitchPro gamepad')
         # Output Stuff
         out_addr = self.int0_endpoint_out.bEndpointAddress
         out_interval = self.int0_endpoint_out.bInterval
-        msg8002 = bytes(b'\x80\x02')  # handshake
-        msg8003 = bytes(b'\x80\x03')  # use fast baud rate
-        msg8004 = bytes(b'0x80\x04')  # do USB HID with no timeout
         # Input Stuff
         in_addr = self.int0_endpoint_in.bEndpointAddress
         in_interval = self.int0_endpoint_in.bInterval
@@ -308,7 +312,7 @@ class InputDevice:
             okay = False
             for _ in range(8):
                 try:
-                    n = self.device.read(in_addr, data, timeout=in_interval)
+                    self.device.read(in_addr, data, timeout=in_interval)
                     (reply,) = unpack_from('>H', data, 0)
                     expect = (code | 0x0100) if (code != 0x8004) else 0x8102
                     if reply == expect:
@@ -334,6 +338,7 @@ class InputDevice:
 
     def init_xinput(self):
         # Prepare XInput gamepad for use.
+        # Exceptions: may raise usb.core.USBError
         logger.info('Initializing XInput gamepad')
         # Input Stuff
         in_addr = self.int0_endpoint_in.bEndpointAddress
@@ -346,11 +351,9 @@ class InputDevice:
         # reports begin, so drain the input pipe
         for _ in range(8):
             try:
-                logger.error("=== XINPUT DRAIN ===")
                 self.device.read(in_addr, data, timeout=in_interval)
             except USBTimeoutError as e:
                 # Ignore timeouts
-                logger.error("=== XINPUT DRAIN ===")
                 pass
 
     def input_event_generator(self):
@@ -358,17 +361,22 @@ class InputDevice:
         # - returns: iterable that can be used with a for loop
         # - yields: uint16 bitfield of current button state. In case of read
         #   timeout or timer throttle, yield value is None.
-        # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
+        # Exceptions: may raise usb.core.USBError
         #
         # This allows calling code to use a for loop to read a stream of input
         # events from a USB device without having to worry about which backend
-        # driver is creating the events. The main advantage of this approach is
-        # that it it uses CPU and memory efficiently by avoiding many heap
-        # allocations and dictionary lookups that other methods would require.
+        # driver is creating the events.
+        #
+        # The advantage of this mildly convoluted implementation, compared to
+        # a typical Python object oriented approach, is improved efficiency.
+        # Other methods of dynamically switching between back-end IO drivers
+        # would generally use far more of heap allocations and dictionary
+        # lookups.
         #
         # Related Docs:
         # - https://docs.python.org/3/glossary.html#term-generator
         # - https://docs.python.org/3/glossary.html#term-iterable
+        # - https://docs.micropython.org/en/latest/reference/speed_python.html
         #
         if self.device is None:
             # caller is trying to poll when device is not connected
@@ -383,18 +391,14 @@ class InputDevice:
         return self.generator_of_nothingness()
 
     def generator_of_nothingness(self):
-        # Generator function to do nothing in a particular formalized way
+        # Generator function: read from interface 0 and yield nothing
         # - yields: None
-        while True:
-            yield None
-
-    def switchpro_event_generator(self):
-        # Generator function to make an iterable for reading SwitchPro events
-        # - returns: iterable that can be used with a for loop
-        # - yields: uint16 bitfield of current button state. In case of read
-        #   timeout or timer throttle, yield value is None.
-        # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
+        # Exceptions: may raise core.usb.USBError
         #
+        # The point of this is to keep polling the USB device so it's possible
+        # to notice when it has been unplugged.
+
+        # Input Stuff
         in_addr = self.int0_endpoint_in.bEndpointAddress
         interval = self.int0_endpoint_in.bInterval
         max_packet = min(64, self.int0_endpoint_in.wMaxPacketSize)
@@ -402,7 +406,50 @@ class InputDevice:
         delay = 0
         delta_ms = elapsed_ms_generator()  # call generator to make iterator
         dev_read = self.device.read  # cache funtion to avoid dictionary lookups
-        timeouts = 0
+        # Start polling for input.
+        # NOTE: To understand what this does, you need to understand the Python
+        # concepts of generator functions, iterators, and generators. The point
+        # of this is to reduce memory pressure from lots of heap allocations
+        # and to reduce CPU time spent on dictionary lookups.
+        while True:
+            # Respect the USB device's polling interval
+            delay += next(delta_ms)
+            if delay < interval:
+                yield None
+                continue
+            else:
+                delay = 0
+            # Okay, now enough time has passed, so poll the endpoint
+            try:
+                dev_read(in_addr, data, timeout=interval)
+                yield None
+            except USBTimeoutError as e:
+                # This is normal. Timeouts happen fairly often.
+                yield None
+            except USBError as e:
+                # This may happen when device is unplugged (or might time out)
+                raise e
+
+    def switchpro_event_generator(self):
+        # Generator function to make an iterable for reading SwitchPro events
+        # - returns: iterable that can be used with a for loop
+        # - yields: uint16 bitfield of current button state. In case of read
+        #   timeout or timer throttle, yield value is None.
+        # Exceptions: may raise usb.core.USBError
+        #
+        in_addr = self.int0_endpoint_in.bEndpointAddress
+        interval = self.int0_endpoint_in.bInterval
+        max_packet = min(64, self.int0_endpoint_in.wMaxPacketSize)
+        data = bytearray(max_packet)
+        data_mv = memoryview(data)  # use memoryview to reduce heap allocations
+        delay = 0
+        delta_ms = elapsed_ms_generator()  # call generator to make iterator
+        dev_read = self.device.read  # cache funtion to avoid dictionary lookups
+        # Start polling for input.
+        # NOTE: To understand what this does, you need to understand the Python
+        # concepts of generator functions, iterators, and generators. The point
+        # of this is to reduce memory pressure from lots of heap allocations
+        # and to reduce CPU time spent on dictionary lookups.
         while True:
             # Respect the USB device's polling interval
             delay += next(delta_ms)
@@ -416,19 +463,14 @@ class InputDevice:
                 # Poll gamepad endpoint and extract only the button state,
                 # ignoring sticks and triggers
                 dev_read(in_addr, data, timeout=interval)
-                timeouts = 0
-                logger.info(' '.join(['%02x' % b for b in data[:20]]))
+                logger.info(' '.join(['%02x' % b for b in data_mv[:20]]))
                 (buttons,) = unpack_from('<H', data, 2)
                 yield buttons
             except USBTimeoutError as e:
-                # This is normal. Timeouts happen fairly often. But, this
-                # also sometimes happens when USB device is unplugged.
-                timeouts = min(0x7ffffffe, timeouts + 1)
-                if timeouts & 0x1ff == 0x1ff:
-                    logger.info('consecutive timeouts: %x' % timeouts)
+                # This is normal. Timeouts happen fairly often.
                 yield None
             except USBError as e:
-                # This sometimes happens when device is unpluged
+                # This may happen when device is unplugfed (or might time out)
                 raise e
 
     def xinput_event_generator(self):
@@ -436,7 +478,7 @@ class InputDevice:
         # - returns: iterable that can be used with a for loop
         # - yields: uint16 bitfield of current button state. In case of read
         #   timeout or timer throttle, yield value is None.
-        # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
+        # Exceptions: may raise usb.core.USBError
         #
         # Expected endpoint 0x81 report format:
         #  bytes 0,1:    prefix that doesn't change      [ignored]
@@ -448,13 +490,20 @@ class InputDevice:
         #  bytes 10,11:  RX right stick X axis (int16)   [ignored]
         #  bytes 12,13:  RY right stick Y axis (int16)   [ignored]
         #  bytes 14..19: ???, but they don't change
-        #
-        endpoint = 0x81
-        interval = 8
-        data = self.buf64  # caching buffer reference avoids dictionary lookups
+
+        # Input Stuff
+        in_addr = self.int0_endpoint_in.bEndpointAddress
+        interval = self.int0_endpoint_in.bInterval
+        max_packet = min(64, self.int0_endpoint_in.wMaxPacketSize)
+        data = bytearray(max_packet)
         delay = 0
         delta_ms = elapsed_ms_generator()  # call generator to make iterator
         dev_read = self.device.read  # cache funtion to avoid dictionary lookups
+        # Start polling for input.
+        # NOTE: To understand what this does, you need to understand the Python
+        # concepts of generator functions, iterators, and generators. The point
+        # of this is to reduce memory pressure from lots of heap allocations
+        # and to reduce CPU time spent on dictionary lookups.
         while True:
             # Respect the USB device's polling interval
             delay += next(delta_ms)
@@ -467,13 +516,12 @@ class InputDevice:
             try:
                 # Poll gamepad endpoint and extract only the button state,
                 # ignoring sticks and triggers
-                dev_read(endpoint, data, timeout=interval)
+                dev_read(in_addr, data, timeout=interval)
                 (buttons,) = unpack_from('<H', data, 2)
                 yield buttons
             except USBTimeoutError as e:
-                # This is normal. Timeouts happen fairly often. But, this
-                # also sometimes happens when USB device is unplugged.
+                # This is normal. Timeouts happen fairly often.
                 yield None
             except USBError as e:
-                # This sometimes happens when device is unpluged
+                # This may happen when device is unplugged (or might time out)
                 raise e
