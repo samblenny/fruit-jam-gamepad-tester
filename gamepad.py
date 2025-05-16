@@ -334,16 +334,24 @@ class InputDevice:
 
     def init_xinput(self):
         # Prepare XInput gamepad for use.
-        # Initial reads may give old data, so drain gamepad's buffer.
         logger.info('Initializing XInput gamepad')
-        timeout_ms = 5
-        try:
-            for _ in range(8):
-                self.device.read(0x81, self.buf64, timeout=timeout_ms)
-        except USBError as e:
-            # Ignore exceptions (can happen if there's nothing to read)
-            pass
+        # Input Stuff
+        in_addr = self.int0_endpoint_in.bEndpointAddress
+        in_interval = self.int0_endpoint_in.bInterval
+        max_packet = min(64, self.int0_endpoint_in.wMaxPacketSize)
+        data = bytearray(max_packet)
+        # LED
         set_xinput_led(self.device, self.player)
+        # Some XInput gamepads send a bunch of stuff initially before normal
+        # reports begin, so drain the input pipe
+        for _ in range(8):
+            try:
+                logger.error("=== XINPUT DRAIN ===")
+                self.device.read(in_addr, data, timeout=in_interval)
+            except USBTimeoutError as e:
+                # Ignore timeouts
+                logger.error("=== XINPUT DRAIN ===")
+                pass
 
     def input_event_generator(self):
         # This is a generator that makes an iterable for reading input events.
