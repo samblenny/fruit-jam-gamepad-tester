@@ -17,6 +17,7 @@
 from micropython import const
 from struct import unpack, unpack_from
 from supervisor import ticks_ms
+from time import sleep
 from usb import core
 from usb.core import USBError, USBTimeoutError
 
@@ -99,7 +100,7 @@ def find_usb_device(device_cache):
             elif int0_info == (0x03, 0x01, 0x02):
                 dev_type = TYPE_BOOT_MOUSE
                 tag = 'BootMouse'
-            elif sr.int0_info == (0x03, 0x00, 0x00):
+            elif int0_info == (0x03, 0x00, 0x00):
                 dev_type = TYPE_HID
                 tag = 'HID'
             return ScanResult(device, dev_type, vid, pid, tag,
@@ -239,8 +240,8 @@ class InputDevice:
         sr = scan_result
         endpoint_in  = None if (len(sr.int0_ins ) < 1) else sr.int0_ins[0]
         endpoint_out = None if (len(sr.int0_outs) < 1) else sr.int0_outs[0]
-        logger.info('INT0 IN: %s' % endpoint_in)
-        logger.info('INT0 OUT: %s' % endpoint_out)
+        logger.debug('INT0 IN: %s' % endpoint_in)
+        logger.debug('INT0 OUT: %s' % endpoint_out)
         self.int0_endpoint_in = endpoint_in
         self.int0_endpoint_out = endpoint_out
         # Initialize USB device if needed (e.g. handshake or set gamepad LEDs)
@@ -248,7 +249,7 @@ class InputDevice:
             # Make sure interface 0 has endpoints for handshake and reading
             if self.int0_endpoint_in is None or self.int0_endpoint_out is None:
                 raise ValueError("Interface 0 descriptor is missing endpoints")
-            logger.error("TODO: IMPLEMENT SWITCH PRO HANDSHAKE")
+            self.init_switch_pro_gamepad()
         elif dev_type == TYPE_XINPUT:
             # Make sure interface 0 has endpoints for handshake and reading
             if self.int0_endpoint_in is None or self.int0_endpoint_out is None:
@@ -266,7 +267,6 @@ class InputDevice:
             # Make sure interface 0 has endpoint for reading
             if self.int0_endpoint_in is None:
                 raise ValueError("Interface 0 descriptor is missing endpoint")
-            self.init_hid_gamepad()
         elif dev_type == TYPE_HID:
             # TODO: maybe dump some HID descriptor info?
             pass
@@ -276,9 +276,61 @@ class InputDevice:
         else:
             raise ValueError('Unknown dev_type: %d' % dev_type)
 
-    def init_hid_gamepad(self):
-        # Prepare generic HID gamepad for use.
-        logger.error("TODO: IMPLEMENT HID GAMEPAD SUPPORT")
+    def init_switch_pro_gamepad(self):
+        # Prepare Switch Pro compatible gamepad for use.
+        # Exceptions: may raise usb.core.USBError and usb.core.USBTimeoutError
+        logger.info('Initializing SwitchPro gamepad')
+        # Output Stuff
+        out_addr = self.int0_endpoint_out.bEndpointAddress
+        out_interval = self.int0_endpoint_out.bInterval
+        msg8002 = bytes(b'\x80\x02')  # handshake
+        msg8003 = bytes(b'\x80\x03')  # use fast baud rate
+        msg8004 = bytes(b'0x80\x04')  # do USB HID with no timeout
+        # Input Stuff
+        in_addr = self.int0_endpoint_in.bEndpointAddress
+        in_interval = self.int0_endpoint_in.bInterval
+        max_packet = min(64, self.int0_endpoint_in.wMaxPacketSize)
+        data = bytearray(max_packet)
+
+        # Send handshake messages
+        msg = bytearray(2)
+        for code in [0x8001, 0x8002, 0x8003, 0x8002, 0x8004]:
+            msg[0] = (code >> 8) & 0xff
+            msg[1] = code & 0xff
+            try:
+                logger.info('SEND: 0x%04x' % code)
+                self.device.write(out_addr, msg, out_interval)
+            except USBTimeoutError:
+                # Attempt 1 retry if first write timed out
+                logger.info('RETRY: 0x%04x' % code)
+                self.device.write(out_addr, msg, out_interval)
+            # Wait for ACK (mostly same as msg with 0x81 in place of 0x80)
+            okay = False
+            for _ in range(8):
+                try:
+                    n = self.device.read(in_addr, data, timeout=in_interval)
+                    (reply,) = unpack_from('>H', data, 0)
+                    expect = (code | 0x0100) if (code != 0x8004) else 0x8102
+                    if reply == expect:
+                        if reply == 0x8101:
+                            logger.info('ACK STATUS %s' % ' '.join(
+                                ['%02x' % b for b in data]))
+                        elif reply == 0x8102:
+                            logger.info('ACK HANDSHAKE')
+                        elif reply == 0x8103:
+                            logger.info('ACK BAUD RATE')
+                        else:
+                            logger.info('ACK: 0x%04x' % reply)
+                        okay = True
+                        break
+                    else:
+                        logger.info('UNEXPECTED: %s' % data)
+                except USBTimeoutError:
+                    logger.debug('READ TIMEOUT')
+                    pass
+            if not okay:
+                logger.error("HANDSHAKE FAILED")
+                return
 
     def init_xinput(self):
         # Prepare XInput gamepad for use.
@@ -314,7 +366,7 @@ class InputDevice:
             # caller is trying to poll when device is not connected
             pass
         elif self.dev_type == TYPE_SWITCH_PRO:
-            pass
+            return self.switchpro_event_generator()
         elif self.dev_type == TYPE_XINPUT:
             return self.xinput_event_generator()
         elif self.dev_type == TYPE_HID_GAMEPAD:
@@ -328,8 +380,51 @@ class InputDevice:
         while True:
             yield None
 
+    def switchpro_event_generator(self):
+        # Generator function to make an iterable for reading SwitchPro events
+        # - returns: iterable that can be used with a for loop
+        # - yields: uint16 bitfield of current button state. In case of read
+        #   timeout or timer throttle, yield value is None.
+        # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
+        #
+        in_addr = self.int0_endpoint_in.bEndpointAddress
+        interval = self.int0_endpoint_in.bInterval
+        max_packet = min(64, self.int0_endpoint_in.wMaxPacketSize)
+        data = bytearray(max_packet)
+        delay = 0
+        delta_ms = elapsed_ms_generator()  # call generator to make iterator
+        dev_read = self.device.read  # cache funtion to avoid dictionary lookups
+        timeouts = 0
+        while True:
+            # Respect the USB device's polling interval
+            delay += next(delta_ms)
+            if delay < interval:
+                yield None
+                continue
+            else:
+                delay = 0
+            # Okay, now enough time has passed, so poll the endpoint
+            try:
+                # Poll gamepad endpoint and extract only the button state,
+                # ignoring sticks and triggers
+                dev_read(in_addr, data, timeout=interval)
+                timeouts = 0
+                logger.info(' '.join(['%02x' % b for b in data[:20]]))
+                (buttons,) = unpack_from('<H', data, 2)
+                yield buttons
+            except USBTimeoutError as e:
+                # This is normal. Timeouts happen fairly often. But, this
+                # also sometimes happens when USB device is unplugged.
+                timeouts = min(0x7ffffffe, timeouts + 1)
+                if timeouts & 0x1ff == 0x1ff:
+                    logger.info('consecutive timeouts: %x' % timeouts)
+                yield None
+            except USBError as e:
+                # This sometimes happens when device is unpluged
+                raise e
+
     def xinput_event_generator(self):
-        # This is a generator that makes an iterable for reading XInput events.
+        # Generator function to make an iterable for reading XInput events
         # - returns: iterable that can be used with a for loop
         # - yields: uint16 bitfield of current button state. In case of read
         #   timeout or timer throttle, yield value is None.
@@ -351,6 +446,7 @@ class InputDevice:
         data = self.buf64  # caching buffer reference avoids dictionary lookups
         delay = 0
         delta_ms = elapsed_ms_generator()  # call generator to make iterator
+        dev_read = self.device.read  # cache funtion to avoid dictionary lookups
         while True:
             # Respect the USB device's polling interval
             delay += next(delta_ms)
@@ -363,7 +459,7 @@ class InputDevice:
             try:
                 # Poll gamepad endpoint and extract only the button state,
                 # ignoring sticks and triggers
-                self.device.read(endpoint, data, timeout=interval)
+                dev_read(endpoint, data, timeout=interval)
                 (buttons,) = unpack_from('<H', data, 2)
                 yield buttons
             except USBTimeoutError as e:

@@ -350,7 +350,7 @@ class HIDReportDesc:
         elif tt == HID_REPORT_ID:            # REPORT ID (IMPORTANT: OPTIONAL!)
             if not (self.report_id is None):
                 self.indent -= 2
-            self.note('Report ID', data)
+            self.note('Report ID', '0x%02x' % data)
             self.indent += 2
             self.report_id = data
         elif tt == HID_REPORT_COUNT:         # NUMBER OF FIELDS IN THIS REPORT
