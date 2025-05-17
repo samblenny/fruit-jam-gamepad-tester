@@ -272,10 +272,10 @@ class InputDevice:
             self.init_xinput()
         elif dev_type == TYPE_BOOT_MOUSE:
             # TODO: maybe implement something for this. maybe.
-            pass
+            logger.info('Initializing Boot-Compatible Mouse')
         elif dev_type == TYPE_BOOT_KEYBOARD:
             # TODO: maybe implement something for this. maybe.
-            pass
+            logger.info('Initializing Boot-Compatible Keyboard')
         elif dev_type == TYPE_HID_GAMEPAD:
             # This covers PC style "DirectInput" or "DInput" along with other
             # types of generic HID gamepads (e.g. non-Pro Switch controllers)
@@ -284,7 +284,7 @@ class InputDevice:
                 raise ValueError("Interface 0 descriptor is missing endpoint")
         elif dev_type == TYPE_HID:
             # TODO: maybe dump some HID descriptor info?
-            pass
+            logger.info('Initializing HID device')
         elif dev_type == TYPE_OTHER:
             # ignore these
             pass
@@ -402,22 +402,28 @@ class InputDevice:
             return self.xinput_event_generator()
         elif self.dev_type == TYPE_HID_GAMEPAD:
             pass
-        # Default fallback generator: do nothing forever
-        return self.generator_of_nothingness()
+        # Default fallback generator (yield raw report data)
+        return self.generic_hid_event_generator()
 
-    def generator_of_nothingness(self):
-        # Generator function: read from interface 0 and yield nothing
-        # - yields: None
+    def generic_hid_event_generator(self):
+        # Generator function: read from interface 0 and yield raw report data
+        # - yields: memoryview of bytes
         # Exceptions: may raise core.usb.USBError
         #
-        # The point of this is to keep polling the USB device so it's possible
-        # to notice when it has been unplugged.
+        # The point of this is get report data from an unknown HID device.
 
         # Input Stuff
+        # This uses two data buffers so its possible to compare the previous
+        # report value with the most recent report value
         in_addr = self.int0_endpoint_in.bEndpointAddress
         interval = self.int0_endpoint_in.bInterval
         max_packet = min(64, self.int0_endpoint_in.wMaxPacketSize)
-        data = bytearray(max_packet)
+        odd = True
+        data_odd  = bytearray(max_packet)
+        data_even = bytearray(max_packet)
+        mv_odd    = memoryview(data_odd)  # memoryview reduces heap allocations
+        mv_even   = memoryview(data_even)
+        prev_report = mv_even
         delay = 0
         delta_ms = elapsed_ms_generator()  # call generator to make iterator
         dev_read = self.device.read  # cache function to avoid dictionary lookups
@@ -435,9 +441,32 @@ class InputDevice:
             else:
                 delay = 0
             # Okay, now enough time has passed, so poll the endpoint
+            curr_data = data_odd if odd else data_even
             try:
-                dev_read(in_addr, data, timeout=interval)
-                yield None
+                # Read report and compare its trimmed data to that of the
+                # previous report. If they differ, then update the previous
+                # value, swap the the active buffer, and yield a memoryview
+                # into the most recent trimmed report data. The even/odd buffer
+                # swapping is necessary for the memoryview stuff to work
+                # properly.
+                if odd:
+                    n = dev_read(in_addr, data_odd, timeout=interval)
+                    report = mv_odd[:n]
+                    if report != prev_report:
+                        prev_report = report
+                        odd = False
+                        yield report
+                    else:
+                        yield None
+                else:
+                    n = dev_read(in_addr, data_even, timeout=interval)
+                    report = mv_even[:n]
+                    if report != prev_report:
+                        prev_report = report
+                        odd = True
+                        yield report
+                    else:
+                        yield None
             except USBTimeoutError as e:
                 # This is normal. Timeouts happen fairly often.
                 yield None

@@ -184,34 +184,45 @@ def main():
             # cause unpredictable behavior.
             dev = InputDevice(scan_result)
             sr = scan_result
-            fmt_args = (sr.vid, sr.pid, sr.tag) + sr.dev_info + sr.int0_info
-            set_status(("%04X:%04X %s\n"  # vid:pid tag
-                "dev  %02X:%02X:%02X\n"   # device class:subclass:protocol
-                "int0 %02X:%02X:%02X\n"   # interface 0 class:subclass:proto.
-                "(button 1: rescan bus)") %
-                fmt_args)
+            status_str = (
+                "%04X:%04X %s\n"            # vid:pid tag
+                "dev  %02X:%02X:%02X\n"     # device class:subclass:protocol
+                "int0 %02X:%02X:%02X\n"     # interface 0 class:subclass:proto.
+                "(button 1: rescan bus)"
+                ) % (
+                (sr.vid, sr.pid, sr.tag) + sr.dev_info + sr.int0_info)
             display.refresh()
 
             # Poll for input events until Button #1 is pressed or until there
             # is a USB error.
             need_LF = False
             prev = 0 & 0xffff      # previous input event state
-            for buttons in dev.input_event_generator():
+            for data in dev.input_event_generator():
                 if not button_1.value:
                     # End polling if Fruit Jam board's Button #1 was pressed
                     break
-                if buttons is None:
+                if data is None:
                     # This means request was throttled or USB read timed out.
                     # both are normal and fine. Just try again.
                     continue
-                diff = prev ^ buttons   # Use bitwise XOR to find any changes
-                prev = buttons
-                if diff or (not need_LF):
-                    # Only update GUI when something actually changed
-                    update_GUI(scene, buttons, diff, status)
-                    print_bits(buttons)  # NOTE: uses print(..., end='')
-                    need_LF = True
-                    display.refresh()
+                if isinstance(data, memoryview) or isinstance(data, bytes):
+                    # Handle bytes from HID report
+                    if data is not None:
+                        # Only update GUI when something actually changed
+                        hexdump = ' '.join(['%02x' % b for b in data])
+                        set_status('%s\n%s' % (status_str, hexdump))
+                        need_LF = True
+                        display.refresh()
+                else:
+                    # Handle uint16 button bitfield
+                    diff = prev ^ data   # Use bitwise XOR to find changes
+                    prev = data
+                    if diff or (not need_LF):
+                        # Only update GUI when something actually changed
+                        update_GUI(scene, data, diff, status)
+                        print_bits(data)  # NOTE: uses print(..., end='')
+                        need_LF = True
+                        display.refresh()
             # Loop stops if somebody pressed button #1 asking for a re-scan
             if need_LF:
                 # Clean up after print_bits()
