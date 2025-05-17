@@ -29,6 +29,7 @@
 # - https://docs.python.org/3/glossary.html#term-iterable
 # - https://docs.micropython.org/en/latest/reference/speed_python.html
 #
+import binascii
 from micropython import const
 from struct import unpack, unpack_from
 from supervisor import ticks_ms
@@ -99,7 +100,7 @@ def find_usb_device(device_cache):
             int0_ins = desc.int0_input_endpoints()
             logger.info(desc)
             dev_type = TYPE_OTHER
-            tag = ''
+            tag = '???'
             if (vid, pid) == (0x057e, 0x2009):
                 dev_type = TYPE_SWITCH_PRO
                 tag = 'SwitchPro'
@@ -180,8 +181,6 @@ def is_xinput_gamepad(descriptor):
     dev_info = descriptor.dev_class_subclass_protocol()
     int0_info = descriptor.int0_class_subclass_protocol()
     if dev_info != (0xff, 0xff, 0xff):
-        return False
-    if d.configs[0].bNumInterfaces != 4:
         return False
     if int0_info == (0xff, 0x5d, 0x01):
         return True
@@ -286,7 +285,7 @@ class InputDevice:
             # TODO: maybe dump some HID descriptor info?
             logger.info('Initializing HID device')
         elif dev_type == TYPE_OTHER:
-            # ignore these
+            logger.info('Initializing Unknown device')
             pass
         else:
             raise ValueError('Unknown dev_type: %d' % dev_type)
@@ -310,46 +309,52 @@ class InputDevice:
         in_interval = self.int0_endpoint_in.bInterval
         max_packet = min(64, self.int0_endpoint_in.wMaxPacketSize)
         data = bytearray(max_packet)
+        data_mv = memoryview(data)
 
+        messages = (
+            bytes(b'\x80\x01'),  # get device type and mac address
+            bytes(b'\x80\x02'),  # handshake
+            bytes(b'\x80\x03'),  # set faster baud rate
+            bytes(b'\x80\x02'),  # handshake
+            bytes(b'\x80\x04'),  # use USB HID only and disable timeout
+            # set input report mode to standard
+            bytes(b'\x01\x06\x00\x00\x00\x00\x00\x00\x00\x00\x03\x30'),
+            # set player LED1 to on (for LED1+LED2 do 30 03, etc.)
+            bytes(b'\x01\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x30\x01'),
+            # set home LED
+            bytes(b'\x01\x0b\x00\x00\x00\x00\x00\x00\x00\x00\x38\x01\x00\x00\x11\x11'),
+        )
         # Send handshake messages
-        msg = bytearray(2)
-        for code in [0x8001, 0x8002, 0x8003, 0x8002, 0x8004]:
-            msg[0] = (code >> 8) & 0xff
-            msg[1] = code & 0xff
+        hexdump = binascii.hexlify  # cache hexdumper function
+        for msg in messages:
             try:
-                logger.info('SEND: 0x%04x' % code)
-                self.device.write(out_addr, msg, out_interval)
-            except USBTimeoutError:
-                # Attempt 1 retry if first write timed out
-                logger.info('RETRY: 0x%04x' % code)
-                self.device.write(out_addr, msg, out_interval)
-            # Wait for ACK (mostly same as msg with 0x81 in place of 0x80)
+                self.device.write(out_addr, msg, timeout=2*out_interval)
+            except USBTimeoutError as e:
+                logger.error('SWITCH WRITE TIMEOUT %s' % hexdump(msg))
+                raise ValueError("SwitchPro HANDSHAKE GLITCH (wr)")
+            # Wait for ACK
             okay = False
             for _ in range(8):
                 try:
-                    self.device.read(in_addr, data, timeout=in_interval)
-                    (reply,) = unpack_from('>H', data, 0)
-                    expect = (code | 0x0100) if (code != 0x8004) else 0x8102
-                    if reply == expect:
-                        if reply == 0x8101:
-                            logger.info('ACK STATUS %s' % ' '.join(
-                                ['%02x' % b for b in data]))
-                        elif reply == 0x8102:
-                            logger.info('ACK HANDSHAKE')
-                        elif reply == 0x8103:
-                            logger.info('ACK BAUD RATE')
-                        else:
-                            logger.info('ACK: 0x%04x' % reply)
-                        okay = True
-                        break
-                    else:
-                        logger.info('UNEXPECTED: %s' % data)
+                    self.device.read(in_addr, data, timeout=2*in_interval)
+                    logger.info('ACK %s' % hexdump(data_mv[:2]))
+                    # This just totally ignores the contents of gamepad's
+                    # response. In practice, just waiting for any response
+                    # seems to work?
+                    okay = True
+                    break
                 except USBTimeoutError:
-                    logger.debug('READ TIMEOUT')
                     pass
             if not okay:
-                logger.error("HANDSHAKE FAILED")
-                return
+                # This happens pretty much every time with my 8BitDo Ultimate
+                # Bluetooth Controller's 2.4 GHz USB adapter. The handshake
+                # goes fine until I try to set the Home LED mode, but then it
+                # times out. I must be missing some subtle aspect of the
+                # handshake that isn't a problem for wired controllers. Result
+                # is that the adapter resets several times then switches to
+                # XInput mode with vid:pid 045e:028e. That works fine, so
+                # whatever. TODO: Maybe research why this is glitching?
+                raise ValueError("SwitchPro HANDSHAKE GLITCH (rd)")
 
     def init_xinput(self):
         # Prepare XInput gamepad for use.
@@ -395,7 +400,7 @@ class InputDevice:
         #
         if self.device is None:
             # caller is trying to poll when device is not connected
-            pass
+            return None
         elif self.dev_type == TYPE_SWITCH_PRO:
             return self.switchpro_event_generator()
         elif self.dev_type == TYPE_XINPUT:
@@ -477,15 +482,21 @@ class InputDevice:
     def switchpro_event_generator(self):
         # Generator function to make an iterable for reading SwitchPro events
         # - returns: iterable that can be used with a for loop
-        # - yields: uint16 bitfield of current button state. In case of read
-        #   timeout or timer throttle, yield value is None.
-        # Exceptions: may raise usb.core.USBError
-        #
+        # - yields: memoryview of bytes
+        # Exceptions: may raise core.usb.USBError
+
+        # Input Stuff
+        # This uses two data buffers so its possible to compare the previous
+        # report value with the most recent report value
         in_addr = self.int0_endpoint_in.bEndpointAddress
         interval = self.int0_endpoint_in.bInterval
         max_packet = min(64, self.int0_endpoint_in.wMaxPacketSize)
-        data = bytearray(max_packet)
-        data_mv = memoryview(data)  # use memoryview to reduce heap allocations
+        odd = True
+        data_odd  = bytearray(max_packet)
+        data_even = bytearray(max_packet)
+        mv_odd    = memoryview(data_odd)  # memoryview reduces heap allocations
+        mv_even   = memoryview(data_even)
+        prev_report = mv_even
         delay = 0
         delta_ms = elapsed_ms_generator()  # call generator to make iterator
         dev_read = self.device.read  # cache function to avoid dictionary lookups
@@ -503,13 +514,44 @@ class InputDevice:
             else:
                 delay = 0
             # Okay, now enough time has passed, so poll the endpoint
+            curr_data = data_odd if odd else data_even
             try:
-                # Poll gamepad endpoint and extract only the button state,
-                # ignoring sticks and triggers
-                dev_read(in_addr, data, timeout=interval)
-                logger.info(' '.join(['%02x' % b for b in data_mv[:20]]))
-                (buttons,) = unpack_from('<H', data, 2)
-                yield buttons
+                # Read report and compare its trimmed data to that of the
+                # previous report. If they differ, then update the previous
+                # value, swap the the active buffer, and yield a memoryview
+                # into the most recent trimmed report data. The even/odd buffer
+                # swapping is necessary for the memoryview stuff to work
+                # properly.
+                if odd:
+                    dev_read(in_addr, data_odd, timeout=interval)
+                    # Ignore report IDs that are not 0x30
+                    if data_odd[0] != 0x30:
+                        yield None
+                        continue
+                    # zero the sequence number byte so diff check will work
+                    data_odd[1] = 0
+                    report = mv_odd[3:12]  # just buttons and sticks
+                    if report != prev_report:
+                        prev_report = report
+                        odd = False
+                        yield report
+                    else:
+                        yield None
+                else:
+                    n = dev_read(in_addr, data_even, timeout=interval)
+                    # Ignore report IDs that are not 0x30
+                    if data_even[0] != 0x30:
+                        yield None
+                        continue
+                    # zero the sequence number byte so diff check will work
+                    data_even[1] = 0
+                    report = mv_even[3:12]  # just buttons and sticks
+                    if report != prev_report:
+                        prev_report = report
+                        odd = True
+                        yield report
+                    else:
+                        yield None
             except USBTimeoutError as e:
                 # This is normal. Timeouts happen fairly often.
                 yield None

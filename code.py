@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright 2024 Sam Blenny
 #
+import binascii
 from board import BUTTON1, CKP, CKN, D0P, D0N, D1P, D1N, D2P, D2N
 from digitalio import DigitalInOut, Direction, Pull
 from displayio import (Bitmap, Group, OnDiskBitmap, Palette, TileGrid,
@@ -156,12 +157,13 @@ def main():
 
     # Define status updater with access to local vars from main()
     def set_status(msg):
-        logger.info(msg.replace('\n', ' '))
+        print(msg.replace('\n', ' '))
         status.text = msg
 
     # MAIN EVENT LOOP
     # Establish and maintain a gamepad connection
     set_status("Scanning USB bus...")
+    hexdump = binascii.hexlify   # cache hexdumper function
     display.refresh()
     device_cache = {}
     while True:
@@ -191,6 +193,7 @@ def main():
                 "(button 1: rescan bus)"
                 ) % (
                 (sr.vid, sr.pid, sr.tag) + sr.dev_info + sr.int0_info)
+            set_status(status_str)
             display.refresh()
 
             # Poll for input events until Button #1 is pressed or until there
@@ -209,8 +212,7 @@ def main():
                     # Handle bytes from HID report
                     if data is not None:
                         # Only update GUI when something actually changed
-                        hexdump = ' '.join(['%02x' % b for b in data])
-                        set_status('%s\n%s' % (status_str, hexdump))
+                        set_status('%s\n%s' % (status_str, hexdump(data)))
                         need_LF = True
                         display.refresh()
                 else:
@@ -238,6 +240,14 @@ def main():
             if need_LF:
                 print()  # clean up after print_bits()
             logger.error("USBError: '%s', %s, '%s'" % (e, type(e), e.errno))
+            set_status("Scanning USB bus...")
+            display.refresh()
+            device_cache = {}
+        except ValueError as e:
+            # This can happen if an initialization handshake glitches
+            if need_LF:
+                print()  # clean up after print_bits()
+            logger.error(e)
             set_status("Scanning USB bus...")
             display.refresh()
             device_cache = {}
