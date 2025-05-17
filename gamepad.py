@@ -402,16 +402,48 @@ class InputDevice:
             # caller is trying to poll when device is not connected
             return None
         elif self.dev_type == TYPE_SWITCH_PRO:
-            return self.switchpro_event_generator()
+            # This filter lambda returns None when report ID is not 0x30.
+            # For report ID 0x30, the filter trims off report ID, seqence
+            # number, and IMU data, leaving just the bytes for buttons, dpad,
+            # and sticks.
+            #
+            # Expected report format (SNES cluster layout, A on right)
+            # byte     0: report ID
+            # byte     1: sequence number
+            # byte     2: 0x01=Y, 0x02=X, 0x04=B, 0x08=A, 0x40=R, 0x80=R2
+            # byte     3: 0x01=Select, 0x02=Start, 0x04=R_stick_btn,
+            #             0x08=L_stick_btn=, 0x10=Home=0x10, 0x20=Share
+            # byte     4: DpadDn=0x01, DpadUp=0x02, DpadR=0x04, DpadL=0x08,
+            #             0x40=L, 0x80=L2
+            # bytes  6-8: Left stick X and Y (maybe 12 bits each ???)
+            # bytes 9-11: Right stick X and Y (maybe 12 bits each ???)
+            #
+            filter_fn = lambda d: None if (d[0] != 0x30) else d[3:12]
+            return self.int0_read_generator(filter_fn=filter_fn)
         elif self.dev_type == TYPE_XINPUT:
-            return self.xinput_event_generator()
+            # Expected report format:
+            #  bytes 0,1:    prefix that doesn't change
+            #  bytes 2,3:    button bitfield for dpad, ABXY, etc (uint16)
+            #  byte  4:      L2 left trigger (analog uint8)
+            #  byte  5:      R2 right trigger (analog uint8)
+            #  bytes 6,7:    LX left stick X axis (int16)
+            #  bytes 8,9:    LY left stick Y axis (int16)
+            #  bytes 10,11:  RX right stick X axis (int16)
+            #  bytes 12,13:  RY right stick Y axis (int16)
+            #  bytes 14..19: ???, but they don't change
+            #
+            return self.int0_read_generator(filter_fn=lambda d: d[2:14])
         elif self.dev_type == TYPE_HID_GAMEPAD:
-            pass
-        # Default fallback generator (yield raw report data)
-        return self.generic_hid_event_generator()
+            return self.int0_read_generator()
+        else:
+            # Default generator (yield raw endpoint data)
+            return self.int0_read_generator()
 
-    def generic_hid_event_generator(self):
+    def int0_read_generator(self, filter_fn=lambda d: d):
         # Generator function: read from interface 0 and yield raw report data
+        # - filter_fn: Optional lambda function to modify raw reports. For
+        #   example, this can slice off the incrementing sequence number
+        #   included in SwitchPro reports (helping to detecting input changes).
         # - yields: memoryview of bytes
         # Exceptions: may raise core.usb.USBError
         #
@@ -432,11 +464,14 @@ class InputDevice:
         delay = 0
         delta_ms = elapsed_ms_generator()  # call generator to make iterator
         dev_read = self.device.read  # cache function to avoid dictionary lookups
-        # Start polling for input.
+
+        # Start polling loop
+        #
         # NOTE: To understand what this does, you need to understand the Python
         # concepts of generator functions, iterators, and generators. The point
         # of this is to reduce memory pressure from lots of heap allocations
         # and to reduce CPU time spent on dictionary lookups.
+        #
         while True:
             # Respect the USB device's polling interval
             delay += next(delta_ms)
@@ -445,19 +480,27 @@ class InputDevice:
                 continue
             else:
                 delay = 0
-            # Okay, now enough time has passed, so poll the endpoint
+
+            # Enough time has passed, so poll endpoint and compare report data
+            # to that of the previous report. If they differ, update the
+            # previous value, swap the active buffer, and yield a memoryview
+            # into the most recent trimmed report data. The even/odd buffer
+            # swapping is necessary for the memoryview stuff to work properly.
+            #
+            # NOTE: This is using a lambda function provided by the caller to
+            # filter the raw data read from the endpoint. The lambda function
+            # can return None when the current read should be skipped (e.g. HID
+            # report with boring report ID).
+            #
             curr_data = data_odd if odd else data_even
             try:
-                # Read report and compare its trimmed data to that of the
-                # previous report. If they differ, then update the previous
-                # value, swap the the active buffer, and yield a memoryview
-                # into the most recent trimmed report data. The even/odd buffer
-                # swapping is necessary for the memoryview stuff to work
-                # properly.
                 if odd:
                     n = dev_read(in_addr, data_odd, timeout=interval)
-                    report = mv_odd[:n]
-                    if report != prev_report:
+                    report = filter_fn(mv_odd[:n])
+                    if report is None:
+                        # This means lambda filter wants to skip this data
+                        yield None
+                    elif report != prev_report:
                         prev_report = report
                         odd = False
                         yield report
@@ -465,146 +508,16 @@ class InputDevice:
                         yield None
                 else:
                     n = dev_read(in_addr, data_even, timeout=interval)
-                    report = mv_even[:n]
-                    if report != prev_report:
+                    report = filter_fn(mv_even[:n])
+                    if report is None:
+                        # This means lambda filter wants to skip this data
+                        yield None
+                    elif report != prev_report:
                         prev_report = report
                         odd = True
                         yield report
                     else:
                         yield None
-            except USBTimeoutError as e:
-                # This is normal. Timeouts happen fairly often.
-                yield None
-            except USBError as e:
-                # This may happen when device is unplugged (or might time out)
-                raise e
-
-    def switchpro_event_generator(self):
-        # Generator function to make an iterable for reading SwitchPro events
-        # - returns: iterable that can be used with a for loop
-        # - yields: memoryview of bytes
-        # Exceptions: may raise core.usb.USBError
-
-        # Input Stuff
-        # This uses two data buffers so its possible to compare the previous
-        # report value with the most recent report value
-        in_addr = self.int0_endpoint_in.bEndpointAddress
-        interval = self.int0_endpoint_in.bInterval
-        max_packet = min(64, self.int0_endpoint_in.wMaxPacketSize)
-        odd = True
-        data_odd  = bytearray(max_packet)
-        data_even = bytearray(max_packet)
-        mv_odd    = memoryview(data_odd)  # memoryview reduces heap allocations
-        mv_even   = memoryview(data_even)
-        prev_report = mv_even
-        delay = 0
-        delta_ms = elapsed_ms_generator()  # call generator to make iterator
-        dev_read = self.device.read  # cache function to avoid dictionary lookups
-        # Start polling for input.
-        # NOTE: To understand what this does, you need to understand the Python
-        # concepts of generator functions, iterators, and generators. The point
-        # of this is to reduce memory pressure from lots of heap allocations
-        # and to reduce CPU time spent on dictionary lookups.
-        while True:
-            # Respect the USB device's polling interval
-            delay += next(delta_ms)
-            if delay < interval:
-                yield None
-                continue
-            else:
-                delay = 0
-            # Okay, now enough time has passed, so poll the endpoint
-            curr_data = data_odd if odd else data_even
-            try:
-                # Read report and compare its trimmed data to that of the
-                # previous report. If they differ, then update the previous
-                # value, swap the the active buffer, and yield a memoryview
-                # into the most recent trimmed report data. The even/odd buffer
-                # swapping is necessary for the memoryview stuff to work
-                # properly.
-                if odd:
-                    dev_read(in_addr, data_odd, timeout=interval)
-                    # Ignore report IDs that are not 0x30
-                    if data_odd[0] != 0x30:
-                        yield None
-                        continue
-                    # zero the sequence number byte so diff check will work
-                    data_odd[1] = 0
-                    report = mv_odd[3:12]  # just buttons and sticks
-                    if report != prev_report:
-                        prev_report = report
-                        odd = False
-                        yield report
-                    else:
-                        yield None
-                else:
-                    n = dev_read(in_addr, data_even, timeout=interval)
-                    # Ignore report IDs that are not 0x30
-                    if data_even[0] != 0x30:
-                        yield None
-                        continue
-                    # zero the sequence number byte so diff check will work
-                    data_even[1] = 0
-                    report = mv_even[3:12]  # just buttons and sticks
-                    if report != prev_report:
-                        prev_report = report
-                        odd = True
-                        yield report
-                    else:
-                        yield None
-            except USBTimeoutError as e:
-                # This is normal. Timeouts happen fairly often.
-                yield None
-            except USBError as e:
-                # This may happen when device is unplugged (or might time out)
-                raise e
-
-    def xinput_event_generator(self):
-        # Generator function to make an iterable for reading XInput events
-        # - returns: iterable that can be used with a for loop
-        # - yields: uint16 bitfield of current button state. In case of read
-        #   timeout or timer throttle, yield value is None.
-        # Exceptions: may raise usb.core.USBError
-        #
-        # Expected endpoint 0x81 report format:
-        #  bytes 0,1:    prefix that doesn't change      [ignored]
-        #  bytes 2,3:    button bitfield for dpad, ABXY, etc (uint16)
-        #  byte  4:      L2 left trigger (analog uint8)  [ignored]
-        #  byte  5:      R2 right trigger (analog uint8) [ignored]
-        #  bytes 6,7:    LX left stick X axis (int16)    [ignored]
-        #  bytes 8,9:    LY left stick Y axis (int16)    [ignored]
-        #  bytes 10,11:  RX right stick X axis (int16)   [ignored]
-        #  bytes 12,13:  RY right stick Y axis (int16)   [ignored]
-        #  bytes 14..19: ???, but they don't change
-
-        # Input Stuff
-        in_addr = self.int0_endpoint_in.bEndpointAddress
-        interval = self.int0_endpoint_in.bInterval
-        max_packet = min(64, self.int0_endpoint_in.wMaxPacketSize)
-        data = bytearray(max_packet)
-        delay = 0
-        delta_ms = elapsed_ms_generator()  # call generator to make iterator
-        dev_read = self.device.read  # cache function to avoid dictionary lookups
-        # Start polling for input.
-        # NOTE: To understand what this does, you need to understand the Python
-        # concepts of generator functions, iterators, and generators. The point
-        # of this is to reduce memory pressure from lots of heap allocations
-        # and to reduce CPU time spent on dictionary lookups.
-        while True:
-            # Respect the USB device's polling interval
-            delay += next(delta_ms)
-            if delay < interval:
-                yield None
-                continue
-            else:
-                delay = 0
-            # Okay, now enough time has passed, so poll the endpoint
-            try:
-                # Poll gamepad endpoint and extract only the button state,
-                # ignoring sticks and triggers
-                dev_read(in_addr, data, timeout=interval)
-                (buttons,) = unpack_from('<H', data, 2)
-                yield buttons
             except USBTimeoutError as e:
                 # This is normal. Timeouts happen fairly often.
                 yield None

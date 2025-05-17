@@ -99,13 +99,6 @@ def update_GUI(scene, buttons, diff, status):
         print(' x: %3d, y: %3d' % (x, y), end='')
     status.anchored_position = x, y
 
-def print_bits(buttons):
-    # Print binary representation of the buttton state bitfield
-    # CAUTION: This uses CR ('\r') to overwrite the same line so the bits
-    # change in place. It looks better that way, but you need to be sure to
-    # end the line with a LF ('\n') before printing other things.
-    print(f"\rbutton bits: {buttons:016b}", end='')
-
 def main():
 
     # Make sure display is configured for 320x240 8-bit
@@ -196,17 +189,15 @@ def main():
             set_status(status_str)
             display.refresh()
 
-            # Poll for input events until Button #1 is pressed or until there
-            # is a USB error.
+            # Poll for input events until Button #1 pressed or USB error
             need_LF = False
-            prev = 0 & 0xffff      # previous input event state
+            prev = 0         # previous input event state
             for data in dev.input_event_generator():
                 if not button_1.value:
                     # End polling if Fruit Jam board's Button #1 was pressed
                     break
                 if data is None:
-                    # This means request was throttled or USB read timed out.
-                    # both are normal and fine. Just try again.
+                    # This means request was throttled or USB read timed out
                     continue
                 if isinstance(data, memoryview) or isinstance(data, bytes):
                     # Handle bytes from HID report
@@ -222,12 +213,15 @@ def main():
                     if diff or (not need_LF):
                         # Only update GUI when something actually changed
                         update_GUI(scene, data, diff, status)
-                        print_bits(data)  # NOTE: uses print(..., end='')
+                        # CAUTION: This uses CR ('\r') to overwrite the same
+                        # line so the numbers change in place rather than
+                        # scrolling up. You need to be sure to end the line
+                        # with a LF ('\n') before printing other things.
+                        print('\r%04x' % data, end='')
                         need_LF = True
                         display.refresh()
             # Loop stops if somebody pressed button #1 asking for a re-scan
             if need_LF:
-                # Clean up after print_bits()
                 print()
             logger.info("=== BUTTON 1 PRESSED ===")
             set_status("Scanning USB bus...")
@@ -238,7 +232,7 @@ def main():
             # unplugged. Can also be caused by other low-level USB stuff. Log
             # the error and stay in the loop to re-scan the USB bus.
             if need_LF:
-                print()  # clean up after print_bits()
+                print()
             logger.error("USBError: '%s', %s, '%s'" % (e, type(e), e.errno))
             set_status("Scanning USB bus...")
             display.refresh()
@@ -246,7 +240,7 @@ def main():
         except ValueError as e:
             # This can happen if an initialization handshake glitches
             if need_LF:
-                print()  # clean up after print_bits()
+                print()
             logger.error(e)
             set_status("Scanning USB bus...")
             display.refresh()
