@@ -443,7 +443,7 @@ class InputDevice:
         # Generator function: read from interface 0 and yield raw report data
         # - filter_fn: Optional lambda function to modify raw reports. For
         #   example, this can slice off the incrementing sequence number
-        #   included in SwitchPro reports (helping to detecting input changes).
+        #   included in SwitchPro reports (helping to detect input changes).
         # - yields: memoryview of bytes
         # Exceptions: may raise core.usb.USBError
         #
