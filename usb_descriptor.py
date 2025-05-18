@@ -257,6 +257,7 @@ class Descriptor:
         # Parse device descriptor (should be 18 bytes long)
         d = device_desc
         self.device_desc_bytes = d
+        self.bcdUSB             = (d[ 3] << 8) | d[ 2]
         self.bDeviceClass       = d[4]
         self.bDeviceSubClass    = d[5]
         self.bDeviceProtocol    = d[6]
@@ -362,6 +363,7 @@ class Descriptor:
 %s
   Config Descriptor Bytes:
 %s
+  bcdUSB: 0x%04x
   bDeviceClass: 0x%02x
   bDeviceSubClass: 0x%02x
   bDeviceProtocol: 0x%02x
@@ -375,6 +377,7 @@ class Descriptor:
         chunks = [fmt % (
             dump_desc(self.device_desc_bytes, indent=4),
             dump_desc(self.config_desc_list, indent=4),
+            self.bcdUSB,
             self.bDeviceClass,
             self.bDeviceSubClass,
             self.bDeviceProtocol,

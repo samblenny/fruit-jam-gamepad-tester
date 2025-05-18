@@ -11,17 +11,6 @@
 # - USB device, configuration, and HID report descriptor parsing to help with
 #   device type detection and with understanding details of unfamiliar devices
 #
-# The button names used here match the Nintendo SNES style button cluster
-# layout (A on the right). This is meant to work with some of the widely
-# available USB wired xinput compatible gamepads, with an emphasis on
-# inexpensive controllers for the retrogaming market.
-#
-# Support for XInput gamepads from 8BitDo is currently the most robust because
-# that's what I use for my primary testing. Switch Pro compatible doesn't work
-# yet. Generic HID (DInput) doesn't work yet. By the time you read this, that
-# implementation status report may not be accurate, depending on whether I
-# remember to update this comment.
-#
 # Related docs:
 # - https://docs.circuitpython.org/projects/logging/en/latest/api.html
 # - https://learn.adafruit.com/a-logger-for-circuitpython/overview
@@ -30,12 +19,14 @@
 # - https://docs.micropython.org/en/latest/reference/speed_python.html
 #
 import binascii
+import gc
 from micropython import const
 from struct import unpack, unpack_from
 from supervisor import ticks_ms
 from time import sleep
 from usb import core
 from usb.core import USBError, USBTimeoutError
+from usb.util import SPEED_LOW, SPEED_FULL, SPEED_HIGH
 
 import adafruit_logging as logging
 
@@ -62,13 +53,15 @@ Y      = const(0x4000)  # button cluster: left button   (Nintendo Y, Xbox X)
 X      = const(0x8000)  # button cluster: top button    (Nintendo X, Xbox Y)
 
 # USB detected device types
-TYPE_SWITCH_PRO    = const(1)
-TYPE_XINPUT        = const(2)
-TYPE_BOOT_MOUSE    = const(3)
-TYPE_BOOT_KEYBOARD = const(4)
-TYPE_HID_GAMEPAD   = const(5)
-TYPE_HID           = const(6)
-TYPE_OTHER         = const(7)
+TYPE_SWITCH_PRO    = const(1)  # 057e:2009 clones of Switch Pro Controller
+TYPE_ADAFRUIT_SNES = const(2)  # 081f:e401 generic SNES layout HID, low-speed
+TYPE_8BITDO_ZERO2  = const(3)  # 2dc8:9018 mini SNES layout, HID over USB-C
+TYPE_XINPUT        = const(4)  # (vid:pid vary) Clones of Xbox360 controller
+TYPE_BOOT_MOUSE    = const(5)
+TYPE_BOOT_KEYBOARD = const(6)
+TYPE_HID_GAMEPAD   = const(7)
+TYPE_HID           = const(8)
+TYPE_OTHER         = const(9)
 
 
 def find_usb_device(device_cache):
@@ -98,12 +91,22 @@ def find_usb_device(device_cache):
             int0_info = desc.int0_class_subclass_protocol()
             int0_outs = desc.int0_output_endpoints()
             int0_ins = desc.int0_input_endpoints()
+            # print the whole device/config/hid descriptor parse tree
+            # TODO: Maybe shorten this? Maybe keep device+config and drop HID?
             logger.info(desc)
             dev_type = TYPE_OTHER
             tag = '???'
             if (vid, pid) == (0x057e, 0x2009):
                 dev_type = TYPE_SWITCH_PRO
                 tag = 'SwitchPro'
+            elif (vid, pid) == (0x081f, 0xe401):
+                # Generic SNES layout HID gamepad sold by Adafruit
+                dev_type = TYPE_ADAFRUIT_SNES
+                tag = 'AdafruitSNES'
+            elif (vid, pid) == (0x2dc8, 0x9018):
+                # This one is HID but quirky, so it needs special handling
+                dev_type = TYPE_8BITDO_ZERO2
+                tag = '8BitDoZero2'
             elif is_xinput_gamepad(desc):
                 dev_type = TYPE_XINPUT
                 tag = 'XInput'
@@ -127,7 +130,7 @@ def find_usb_device(device_cache):
             pass
         except USBError as e:
             # USBError can happen when device first connects
-            logger.error("USBError: '%s', %s, '%s'" % (e, type(e), e.errno))
+            logger.error("USBError: '%s'" % e)
             pass
     return None
 
@@ -264,6 +267,10 @@ class InputDevice:
             if self.int0_endpoint_in is None or self.int0_endpoint_out is None:
                 raise ValueError("Interface 0 descriptor is missing endpoints")
             self.init_switch_pro_gamepad()
+        elif dev_type == TYPE_ADAFRUIT_SNES:
+            logger.info('Initializing Adafruit SNES-like gamepad')
+        elif dev_type == TYPE_8BITDO_ZERO2:
+            logger.info('Initializing 8BitDo Zero 2 gamepad')
         elif dev_type == TYPE_XINPUT:
             # Make sure interface 0 has endpoints for handshake and reading
             if self.int0_endpoint_in is None or self.int0_endpoint_out is None:
@@ -282,7 +289,6 @@ class InputDevice:
             if self.int0_endpoint_in is None:
                 raise ValueError("Interface 0 descriptor is missing endpoint")
         elif dev_type == TYPE_HID:
-            # TODO: maybe dump some HID descriptor info?
             logger.info('Initializing HID device')
         elif dev_type == TYPE_OTHER:
             logger.info('Initializing Unknown device')
@@ -379,49 +385,74 @@ class InputDevice:
     def input_event_generator(self):
         # This is a generator that makes an iterable for reading input events.
         # - returns: iterable that can be used with a for loop
-        # - yields: uint16 bitfield of current button state. In case of read
-        #   timeout or timer throttle, yield value is None.
+        # - yields: Either a memoryview(bytearray(...)) with whatever data came
+        #   back from polling the endpoint. In case of a timeout or rate limit
+        #   throttle, the yield value is None.
         # Exceptions: may raise usb.core.USBError
         #
         # This allows calling code to use a for loop to read a stream of input
         # events from a USB device without having to worry about which backend
         # driver is creating the events.
         #
-        # The advantage of this mildly convoluted implementation, compared to
-        # a typical Python object oriented approach, is improved efficiency.
-        # Other methods of dynamically switching between back-end IO drivers
-        # would generally use far more of heap allocations and dictionary
-        # lookups.
+        # Using this implementation strategy gives us a performance boost from
+        # avoiding a lot of heap allocations and dictionary lookups. If we were
+        # to use an idiomatic OOP thing here, with classes and polymorphism, it
+        # would make the Python VM do a lot more work.
         #
-        # Related Docs:
-        # - https://docs.python.org/3/glossary.html#term-generator
-        # - https://docs.python.org/3/glossary.html#term-iterable
-        # - https://docs.micropython.org/en/latest/reference/speed_python.html
-        #
+        dev_type = self.dev_type  # cache this as we use it several times
+        int0_gen = self.int0_read_generator  # cache to make shorter lines
         if self.device is None:
             # caller is trying to poll when device is not connected
             return None
-        elif self.dev_type == TYPE_SWITCH_PRO:
+        elif dev_type == TYPE_SWITCH_PRO:
             # This filter lambda returns None when report ID is not 0x30.
-            # For report ID 0x30, the filter trims off report ID, seqence
+            # For report ID 0x30, the filter trims off report ID, sequence
             # number, and IMU data, leaving just the bytes for buttons, dpad,
             # and sticks.
             #
-            # Expected report format (SNES cluster layout, A on right)
+            # Expected report format (cluster layout: A on right)
             # byte     0: report ID
             # byte     1: sequence number
             # byte     2: 0x01=Y, 0x02=X, 0x04=B, 0x08=A, 0x40=R, 0x80=R2
             # byte     3: 0x01=Select, 0x02=Start, 0x04=R_stick_btn,
-            #             0x08=L_stick_btn=, 0x10=Home=0x10, 0x20=Share
+            #             0x08=L_stick_btn, 0x10=Home=0x10, 0x20=Share
             # byte     4: DpadDn=0x01, DpadUp=0x02, DpadR=0x04, DpadL=0x08,
             #             0x40=L, 0x80=L2
             # bytes  6-8: Left stick X and Y (maybe 12 bits each ???)
             # bytes 9-11: Right stick X and Y (maybe 12 bits each ???)
             #
-            filter_fn = lambda d: None if (d[0] != 0x30) else d[3:12]
-            return self.int0_read_generator(filter_fn=filter_fn)
-        elif self.dev_type == TYPE_XINPUT:
-            # Expected report format:
+            # This filter trims off all the analog stuff (helps keep FPS up)
+            filter_fn = lambda d: None if (d[0] != 0x30) else d[3:6]
+            return int0_gen(filter_fn=filter_fn)
+        elif dev_type == TYPE_ADAFRUIT_SNES:
+            # Expected report format (SNES cluster layout, A on right)
+            # byte 0: (analog dpad) 0x00=dPadL, 0x7f=dPadCenter, 0xff=dPadR
+            # byte 1: (analog dpad) 0x00=dPadUp, 0x7f=dPadCenter, 0xff=dPadDn
+            # byte 2: unused (0x00)
+            # byte 3: unused (0x80)
+            # byte 4: unused (0x80)
+            # byte 5: (bitfield) 0x10=X, 0x20=A, 0x40=B, 0x80=Y
+            # byte 6: (bitfield) 0x01=L, 0x02=R, 0x10=Select, 0x20=Start
+            # byte 7: unused (0x00)
+            #
+            return int0_gen(filter_fn=lambda d: d[:7])
+        elif dev_type == TYPE_8BITDO_ZERO2:
+            # This device is quirky because it alternates between 8 byte and
+            # 24 byte HID reports. The 24 byte reports seem to be three of the
+            # 8 byte reports stuck together. Also, the only interesting stuff
+            # happens in the first 3 bytes.
+            #
+            # Expected report format (note dpad is 4-bit BCD style):
+            # byte 0: 0x01=A, 0x02=B, 0x08=X, 0x10=Y, 0x40=L, 0x80=R
+            # byte 1: 0x04=Select, 0x08=Start
+            # byte 2: 0x00=dPadN, 0x01=dPadNE, 0x02=dPadE, 0x03=dPadSE,
+            #         0x04=dPadS, 0x05=dPadSW, 0x06=dPadW, 0x07=dPadNW,
+            #         0x0f=dPadCenter
+            # bytes 3+: whatever... don't care
+            #
+            return int0_gen(filter_fn=lambda d: d[:3])
+        elif dev_type == TYPE_XINPUT:
+            # Expected report format (clone w/ SNES cluster layout, A on right):
             #  bytes 0,1:    prefix that doesn't change
             #  bytes 2,3:    button bitfield for dpad, ABXY, etc (uint16)
             #  byte  4:      L2 left trigger (analog uint8)
@@ -432,12 +463,15 @@ class InputDevice:
             #  bytes 12,13:  RY right stick Y axis (int16)
             #  bytes 14..19: ???, but they don't change
             #
-            return self.int0_read_generator(filter_fn=lambda d: d[2:14])
-        elif self.dev_type == TYPE_HID_GAMEPAD:
-            return self.int0_read_generator()
+            # This filter trims off all the analog stuff (helps keep FPS up)
+            return int0_gen(filter_fn=lambda d: d[2:4])
         else:
-            # Default generator (yield raw endpoint data)
-            return self.int0_read_generator()
+            # For other test devices I've experimented with, the interesting
+            # stuff mostly happens within the first 10 bytes. This filter
+            # slices off anything longer than that.
+            # TODO: Reconsider if this slice length is still appropriate
+            #
+            return int0_gen(filter_fn=lambda d: d[:10])
 
     def int0_read_generator(self, filter_fn=lambda d: d):
         # Generator function: read from interface 0 and yield raw report data
@@ -447,13 +481,35 @@ class InputDevice:
         # - yields: memoryview of bytes
         # Exceptions: may raise core.usb.USBError
         #
-        # The point of this is get report data from an unknown HID device.
+        # CAUTION: Polling frequency affects system stability. Poll too fast,
+        # and CircuitPython seems more likely to crash. Too slow, and some USB
+        # devices may reset.
+        #
+        # CAUTION: The meaning of bInterval is tricky and it depends on on the
+        # the actual negotiated speed. For details, see USB 2.0 spec:
+        #  - 5.6.4 Isochronous Transfer Bus Access Constraints
+        #  - 9.6.6 Endpoint (table 9-13. Standard Endpoint Descriptor)
+        # Meaning of bInterval based on connection speed (`^` here means
+        # "raised to the power of"):
+        #  - Low-speed: max time between polling requests = bInterval * 1 ms
+        #  - Full-speed: max time = bInterval * 1 ms
+        #  - High-speed: max time = 2^(bInterval-1) * 125 µs
 
-        # Input Stuff
-        # This uses two data buffers so its possible to compare the previous
-        # report value with the most recent report value
+        # Input Endpoint Stuff
+        # This uses two data buffers so it's possible to compare the previous
+        # report value with the most recent report value.
         in_addr = self.int0_endpoint_in.bEndpointAddress
         interval = self.int0_endpoint_in.bInterval
+        if self.device.speed == SPEED_LOW:
+            logger.info('LOW SPEED, period = %d ms' % interval)
+        elif self.device.speed == SPEED_FULL:
+            logger.info('FULL SPEED, period = %d ms' % interval)
+        elif self.device.speed == SPEED_HIGH:
+            # Units here are 125 µs or (1 ms)/8. Since timer resolution we have
+            # available is 1 ms, quantize the requested interval to 1 ms units
+            # (left shift 3 to divide by 8).
+            interval = (2 << (interval - 1)) >> 3
+            logger.info('HIGH SPEED, period = %d ms' % interval)
         max_packet = min(64, self.int0_endpoint_in.wMaxPacketSize)
         odd = True
         data_odd  = bytearray(max_packet)
@@ -461,9 +517,13 @@ class InputDevice:
         mv_odd    = memoryview(data_odd)  # memoryview reduces heap allocations
         mv_even   = memoryview(data_even)
         prev_report = mv_even
-        delay = 0
-        delta_ms = elapsed_ms_generator()  # call generator to make iterator
         dev_read = self.device.read  # cache function to avoid dictionary lookups
+
+        # Make timer to throttle the polling rate because...
+        # 1. Reading USB too much bogs down the system and fights with DVI
+        # 2. Waiting too long to read USB will upset some devices
+        poll_ms = 0
+        poll_dt = elapsed_ms_generator()
 
         # Start polling loop
         #
@@ -474,12 +534,12 @@ class InputDevice:
         #
         while True:
             # Respect the USB device's polling interval
-            delay += next(delta_ms)
-            if delay < interval:
+            poll_ms += next(poll_dt)
+            if poll_ms < interval:
                 yield None
                 continue
             else:
-                delay = 0
+                poll_ms = 0
 
             # Enough time has passed, so poll endpoint and compare report data
             # to that of the previous report. If they differ, update the
@@ -497,30 +557,24 @@ class InputDevice:
                 if odd:
                     n = dev_read(in_addr, data_odd, timeout=interval)
                     report = filter_fn(mv_odd[:n])
-                    if report is None:
-                        # This means lambda filter wants to skip this data
+                    if (report is None) or (report == prev_report):
                         yield None
-                    elif report != prev_report:
+                    else:
                         prev_report = report
                         odd = False
                         yield report
-                    else:
-                        yield None
                 else:
                     n = dev_read(in_addr, data_even, timeout=interval)
                     report = filter_fn(mv_even[:n])
-                    if report is None:
-                        # This means lambda filter wants to skip this data
+                    if (report is None) or (report == prev_report):
                         yield None
-                    elif report != prev_report:
+                    else:
                         prev_report = report
                         odd = True
                         yield report
-                    else:
-                        yield None
             except USBTimeoutError as e:
                 # This is normal. Timeouts happen fairly often.
                 yield None
             except USBError as e:
-                # This may happen when device is unplugged (or might time out)
+                # This may happen when device is unplugged (not always though)
                 raise e

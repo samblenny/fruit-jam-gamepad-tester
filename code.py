@@ -115,6 +115,8 @@ def main():
     else:
         logger.info("Using existing display")
     display.auto_refresh = False
+    grp = Group(scale=2)  # 2x zoom
+    display.root_group = grp
 
     # load spritesheet and palette
     (bitmap, palette) = adafruit_imageload.load("sprites.bmp", bitmap=Bitmap,
@@ -132,9 +134,7 @@ def main():
     for (y, row) in enumerate(tilemap):
         for (x, sprite) in enumerate(row):
             scene[x, y] = sprite
-    grp = Group(scale=2)  # 2x zoom
     grp.append(scene)
-    display.root_group = grp
 
     # Make a text label for status messages
     status = bitmap_label.Label(FONT, text="", color=0xFFFFFF, scale=1)
@@ -143,20 +143,37 @@ def main():
     status.anchored_position = (8, 54)
     grp.append(status)
 
+    # Make a separate text label for input event report data
+    report = bitmap_label.Label(FONT, text="", color=0xFFFFFF, scale=1)
+    report.line_spacing = 1.0
+    report.anchor_point = (0, 0)
+    report.anchored_position = (8, 54 + (12*4))
+    grp.append(report)
+
     # Configure button #1 as input to trigger USB bus re-connect
     button_1 = DigitalInOut(BUTTON1)
     button_1.direction = Direction.INPUT
     button_1.pull = Pull.UP
 
-    # Define status updater with access to local vars from main()
+    # Define status label updater with access to local vars from main()
     def set_status(msg):
         print(msg.replace('\n', ' '))
         status.text = msg
 
+    # Define report label updater with access to local vars from main()
+    # CAUTION: This prints with a CR ('\r') and end=''
+    def set_report(data):
+        if data is None:
+            print()
+            report.text = ''
+        else:
+            msg = ' '.join(['%02x' % b for b in data])
+            print('\r%s' % msg, end='')
+            report.text = msg
+
     # MAIN EVENT LOOP
     # Establish and maintain a gamepad connection
     set_status("Scanning USB bus...")
-    hexdump = binascii.hexlify   # cache hexdumper function
     display.refresh()
     device_cache = {}
     while True:
@@ -173,24 +190,24 @@ def main():
                 sleep(0.4)
                 continue
             # Found an input device, so try to configure it and start polling
-            logger.info("Found device. Connecting...")
+            #
             # CAUTION! Allowing a display refresh between the calls to
             # usb.core.find() and usb.core.Device.set_configuration() may
             # cause unpredictable behavior.
             dev = InputDevice(scan_result)
             sr = scan_result
-            status_str = (
+            set_status((
                 "%04X:%04X %s\n"            # vid:pid tag
                 "dev  %02X:%02X:%02X\n"     # device class:subclass:protocol
                 "int0 %02X:%02X:%02X\n"     # interface 0 class:subclass:proto.
                 "(button 1: rescan bus)"
                 ) % (
-                (sr.vid, sr.pid, sr.tag) + sr.dev_info + sr.int0_info)
-            set_status(status_str)
+                    (sr.vid, sr.pid, sr.tag) + sr.dev_info + sr.int0_info
+                )
+            )
             display.refresh()
 
             # Poll for input events until Button #1 pressed or USB error
-            need_LF = False
             prev = 0         # previous input event state
             for data in dev.input_event_generator():
                 if not button_1.value:
@@ -199,30 +216,12 @@ def main():
                 if data is None:
                     # This means request was throttled or USB read timed out
                     continue
-                if isinstance(data, memoryview) or isinstance(data, bytes):
-                    # Handle bytes from HID report
-                    if data is not None:
-                        # Only update GUI when something actually changed
-                        set_status('%s\n%s' % (status_str, hexdump(data)))
-                        need_LF = True
-                        display.refresh()
                 else:
-                    # Handle uint16 button bitfield
-                    diff = prev ^ data   # Use bitwise XOR to find changes
-                    prev = data
-                    if diff or (not need_LF):
-                        # Only update GUI when something actually changed
-                        update_GUI(scene, data, diff, status)
-                        # CAUTION: This uses CR ('\r') to overwrite the same
-                        # line so the numbers change in place rather than
-                        # scrolling up. You need to be sure to end the line
-                        # with a LF ('\n') before printing other things.
-                        print('\r%04x' % data, end='')
-                        need_LF = True
-                        display.refresh()
+                    # Handle bytes from HID report
+                    set_report(data)
+                    display.refresh()
             # Loop stops if somebody pressed button #1 asking for a re-scan
-            if need_LF:
-                print()
+            set_report(None)
             logger.info("=== BUTTON 1 PRESSED ===")
             set_status("Scanning USB bus...")
             display.refresh()
@@ -231,16 +230,14 @@ def main():
             # This happens sometimes, but not always, when USB device is
             # unplugged. Can also be caused by other low-level USB stuff. Log
             # the error and stay in the loop to re-scan the USB bus.
-            if need_LF:
-                print()
+            set_report(None)
             logger.error("USBError: '%s', %s, '%s'" % (e, type(e), e.errno))
             set_status("Scanning USB bus...")
             display.refresh()
             device_cache = {}
         except ValueError as e:
             # This can happen if an initialization handshake glitches
-            if need_LF:
-                print()
+            set_report(None)
             logger.error(e)
             set_status("Scanning USB bus...")
             display.refresh()
