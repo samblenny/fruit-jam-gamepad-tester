@@ -79,7 +79,10 @@ def find_usb_device(device_cache):
             # Compare descriptor to known device type fingerprints
             desc.read_configuration(device)
             vid, pid = desc.vid_pid()
+            # Get tuples of class/subclass/protocol for device and interface 0
+            dev_info = desc.dev_class_subclass_protocol()
             int0_info = desc.int0_class_subclass_protocol()
+            dev_int0_info = dev_info + int0_info
             logger.info(desc)
             dev = device
             if (vid, pid) == (0x057e, 0x2009):
@@ -90,13 +93,13 @@ def find_usb_device(device_cache):
             elif (vid, pid) == (0x2dc8, 0x9018):
                 # This one is HID but quirky, so it needs special handling
                 return ScanResult(dev, TYPE_8BITDO_ZERO2, '8BitDoZero2', desc)
-            elif is_xinput_gamepad(desc):
+            elif dev_int0_info == (0xff, 0xff, 0xff, 0xff, 0x5d, 0x01):
                 return ScanResult(dev, TYPE_XINPUT, 'XInput', desc)
-            elif is_hid_composite(desc):
+            elif dev_int0_info == (0x00, 0x00, 0x00, 0x03, 0x00, 0x00):
                 return ScanResult(dev, TYPE_HID_COMPOSITE, 'HIDComposite', desc)
-            elif int0_info == (0x03, 0x01, 0x01):
+            elif dev_int0_info == (0x00, 0x00, 0x00, 0x03, 0x01, 0x01):
                 return ScanResult(dev, TYPE_BOOT_KEYBOARD, 'BootKeyboard', desc)
-            elif int0_info == (0x03, 0x01, 0x02):
+            elif dev_int0_info == (0x00, 0x00, 0x00, 0x03, 0x01, 0x02):
                 return ScanResult(dev, TYPE_BOOT_MOUSE, 'BootMouse', desc)
             elif int0_info == (0x03, 0x00, 0x00):
                 return ScanResult(dev, TYPE_HID, 'HID', desc)
@@ -121,29 +124,6 @@ class ScanResult:
         self.dev_info = descriptor.dev_class_subclass_protocol()
         self.int0_info = descriptor.int0_class_subclass_protocol()
 
-
-
-def is_hid_composite(descriptor):
-    # Return True if descriptor details look like a composite HID device.
-    # - descriptor: usb_descriptor.Descriptor instance
-    #
-    # This could be a gamepad. Or, might be another type of HID input device.
-    #
-    dev_info = descriptor.dev_class_subclass_protocol()
-    int0_info = descriptor.int0_class_subclass_protocol()
-    return dev_info == (0x00, 0x00, 0x00) and int0_info == (0x03, 0x00, 0x00)
-
-def is_xinput_gamepad(descriptor):
-    # Return True if descriptor details match pattern for an XInput gamepad
-    # - descriptor: usb_descriptor.Descriptor instance
-    d = descriptor
-    dev_info = descriptor.dev_class_subclass_protocol()
-    int0_info = descriptor.int0_class_subclass_protocol()
-    if dev_info != (0xff, 0xff, 0xff):
-        return False
-    if int0_info == (0xff, 0x5d, 0x01):
-        return True
-    return False
 
 def set_xinput_led(device, player):
     # Set player number LEDs on XInput gamepad
