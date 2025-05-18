@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright 2025 Sam Blenny
 #
-# Gamepad driver for XInput (Xbox360 compatible), DInput (generic HID), or
-# Nintendo Switch Pro Controller compatible USB wired gamepads.
+# Gamepad driver for various USB wired gamepads.
 #
-# This also does:
-# - Device type detection and reporting for USB HID devices, including mice and
-#   keyboards, to the extent that it's useful for telling them apart from HID
-#   game controller devices
-# - USB device, configuration, and HID report descriptor parsing to help with
-#   device type detection and with understanding details of unfamiliar devices
+# NOTE: This code does a lot of IO very quickly (by CircuitPython standards),
+# so it uses performance boosting tricks to avoid bogging down the CPU or
+# making a lot of heap allocations. To learn more about caching function
+# references, caching instance variables, and making iterators with generator
+# functions, check out the links below.
 #
 # Related docs:
 # - https://docs.circuitpython.org/projects/logging/en/latest/api.html
@@ -61,7 +59,6 @@ TYPE_BOOT_MOUSE    = const(5)
 TYPE_BOOT_KEYBOARD = const(6)
 TYPE_HID_COMPOSITE = const(7)
 TYPE_HID           = const(8)
-TYPE_OTHER         = const(9)
 
 
 def find_usb_device(device_cache):
@@ -71,87 +68,59 @@ def find_usb_device(device_cache):
     # Exceptions: may raise usb.core.USBError or usb.core.USBTimeoutError
     #
     for device in core.find(find_all=True):
-        # Read device and configuration descriptors to find details
-        # to help identify DInput or XInput gamepads
+        # Read descriptors to identify devices by type
         try:
             desc = usb_descriptor.Descriptor(device)
             k = str(desc.to_bytes())
             if k in device_cache:
-                # Ignore previously checked devices. The point of this is to
-                # avoid repeatedly spewing log output about devices that are
-                # not interesting (e.g. want a gamepad but found a keyboard)
-                logger.debug("Ignoring cached device")
                 return None
             # Remember this device to avoid repeatedly checking it later
             device_cache[k] = True
-            # Read and parse the device's configuration descriptor
+            # Compare descriptor to known device type fingerprints
             desc.read_configuration(device)
             vid, pid = desc.vid_pid()
-            dev_info = desc.dev_class_subclass_protocol()
             int0_info = desc.int0_class_subclass_protocol()
-            int0_outs = desc.int0_output_endpoints()
-            int0_ins = desc.int0_input_endpoints()
-            # print the whole device/config/hid descriptor parse tree
-            # TODO: Maybe shorten this? Maybe keep device+config and drop HID?
             logger.info(desc)
-            dev_type = TYPE_OTHER
-            tag = '???'
+            dev = device
             if (vid, pid) == (0x057e, 0x2009):
-                dev_type = TYPE_SWITCH_PRO
-                tag = 'SwitchPro'
+                return ScanResult(dev, TYPE_SWITCH_PRO, 'SwitchPro', desc)
             elif (vid, pid) == (0x081f, 0xe401):
                 # Generic SNES layout HID gamepad sold by Adafruit
-                dev_type = TYPE_ADAFRUIT_SNES
-                tag = 'AdafruitSNES'
+                return ScanResult(dev, TYPE_ADAFRUIT_SNES, 'AdafruitSNES', desc)
             elif (vid, pid) == (0x2dc8, 0x9018):
                 # This one is HID but quirky, so it needs special handling
-                dev_type = TYPE_8BITDO_ZERO2
-                tag = '8BitDoZero2'
+                return ScanResult(dev, TYPE_8BITDO_ZERO2, '8BitDoZero2', desc)
             elif is_xinput_gamepad(desc):
-                dev_type = TYPE_XINPUT
-                tag = 'XInput'
+                return ScanResult(dev, TYPE_XINPUT, 'XInput', desc)
             elif is_hid_composite(desc):
-                dev_type = TYPE_HID_COMPOSITE
-                tag = 'HIDComposite'
+                return ScanResult(dev, TYPE_HID_COMPOSITE, 'HIDComposite', desc)
             elif int0_info == (0x03, 0x01, 0x01):
-                dev_type = TYPE_BOOT_KEYBOARD
-                tag = 'BootKeyboard'
+                return ScanResult(dev, TYPE_BOOT_KEYBOARD, 'BootKeyboard', desc)
             elif int0_info == (0x03, 0x01, 0x02):
-                dev_type = TYPE_BOOT_MOUSE
-                tag = 'BootMouse'
+                return ScanResult(dev, TYPE_BOOT_MOUSE, 'BootMouse', desc)
             elif int0_info == (0x03, 0x00, 0x00):
-                dev_type = TYPE_HID
-                tag = 'HID'
-            return ScanResult(device, dev_type, vid, pid, tag,
-                dev_info, int0_info, int0_outs, int0_ins)
+                return ScanResult(dev, TYPE_HID, 'HID', desc)
+            else:
+                logger.info("IGNORING UNRECOGNIZED DEVICE")
+                return None
         except ValueError as e:
-            # This happens for errors during descriptor parsing
-            logger.error(e)
-            pass
+            logger.info(e)
         except USBError as e:
-            # USBError can happen when device first connects
-            logger.error("find_usb_device() USBError: '%s'" % e)
-            pass
+            logger.info("find_usb_device() USBError: '%s'" % e)
     return None
 
 
 class ScanResult:
-    def __init__(self, device, dev_type, vid, pid, tag, dev_info, int0_info,
-        int0_outs, int0_ins
-        ):
-        if len(dev_info) != 3:
-            raise ValueError("Expected (class,subclass,protocol) for dev_info")
-        if len(int0_info) != 3:
-            raise ValueError("Expected (class,subclass,protocol) for int0_info")
+    def __init__(self, device, dev_type, tag, descriptor):
         self.device = device
         self.dev_type = dev_type
-        self.vid = vid
-        self.pid = pid
         self.tag = tag
-        self.dev_info = dev_info
-        self.int0_info = int0_info
-        self.int0_outs = int0_outs
-        self.int0_ins = int0_ins
+        self.descriptor = descriptor
+        self.vid = descriptor.idVendor
+        self.pid = descriptor.idProduct
+        self.dev_info = descriptor.dev_class_subclass_protocol()
+        self.int0_info = descriptor.int0_class_subclass_protocol()
+
 
 
 def is_hid_composite(descriptor):
@@ -241,9 +210,10 @@ class InputDevice:
         # Set configuration
         device.set_configuration()
         # Figure out which endpoints to use
-        sr = scan_result
-        endpoint_in  = None if (len(sr.int0_ins ) < 1) else sr.int0_ins[0]
-        endpoint_out = None if (len(sr.int0_outs) < 1) else sr.int0_outs[0]
+        int0_ins = scan_result.descriptor.int0_input_endpoints()
+        int0_outs = scan_result.descriptor.int0_output_endpoints()
+        endpoint_in  = None if (len(int0_ins) < 1) else int0_ins[0]
+        endpoint_out = None if (len(int0_outs) < 1) else int0_outs[0]
         logger.debug('INT0 IN: %s' % endpoint_in)
         logger.debug('INT0 OUT: %s' % endpoint_out)
         self.int0_endpoint_in = endpoint_in
@@ -265,9 +235,6 @@ class InputDevice:
             logger.info('Initializing HID composite device')
         elif dev_type == TYPE_HID:
             logger.info('Initializing HID device')
-        elif dev_type == TYPE_OTHER:
-            logger.info('Initializing Unknown device')
-            pass
         else:
             raise ValueError('Unknown dev_type: %d' % dev_type)
 

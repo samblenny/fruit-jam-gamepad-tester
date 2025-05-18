@@ -60,13 +60,12 @@ class ConfigDesc:
         # - d: bytearray containing a 9 byte configuration descriptor
         if len(d) != 9 or d[0] != 0x09 or d[1] != 0x02:
             raise ValueError("Bad configuration descriptor")
-        self.bNumInterfaces      = d[4]
         self.bConfigurationValue = d[5]  # for set_configuration()
         self.bMaxPower           = d[8]  # units are 2 mA
 
     def __str__(self):
-        return '  Config %d: NumInterfaces: %d, MaxPower: %d mA' % (
-            self.bConfigurationValue, self.bNumInterfaces, self.bMaxPower * 2)
+        return '  Config %d: %d mA' % (
+            self.bConfigurationValue, self.bMaxPower * 2)
 
 
 class InterfaceDesc:
@@ -87,7 +86,7 @@ class InterfaceDesc:
 
     def __str__(self):
         fmt = ('  Interface %d: '
-            '(Class, SubClass, Protocol): (0x%02x, 0x%02x, 0x%02x)')
+            '(class, subclass, proto): (0x%02x, 0x%02x, 0x%02x)')
         chunks = [fmt % (
             self.bInterfaceNumber,
             self.bInterfaceClass,
@@ -109,7 +108,7 @@ class EndpointDesc:
         self.bInterval        = d[6]
 
     def __str__(self):
-        return '    Endpoint 0x%02x: wMaxPacketSize: %d, bInterval: %d ms' % (
+        return '    Endpoint 0x%02x: maxPacket: %d, interval: %d' % (
             self.bEndpointAddress,
             self.wMaxPacketSize,
             self.bInterval)
@@ -208,9 +207,9 @@ class Descriptor:
 
     def __str__(self):
         fmt = """Descriptor:
-  idVendor:idProduct: %04x:%04x
+  vid:pid: %04x:%04x
   bcdUSB: 0x%04x
-  (bDeviceClass, bDeviceSubClass, bDeviceProtocol): (0x%02x, 0x%02x, 0x%02x)"""
+  (class, subclass, proto): (0x%02x, 0x%02x, 0x%02x)"""
         chunks = [fmt % (
             self.idVendor,
             self.idProduct,
