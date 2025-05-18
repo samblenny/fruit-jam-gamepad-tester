@@ -421,9 +421,45 @@ class InputDevice:
             # bytes  6-8: Left stick X and Y (maybe 12 bits each ???)
             # bytes 9-11: Right stick X and Y (maybe 12 bits each ???)
             #
+            # Generator function converts byte array to an XInput format uint16
+            # - data: an iterator that yields memoryview(bytearray(...))
+            def normalize_switchpro(data):
+                for d in data:
+                    if d is None:
+                        yield None
+                        continue
+                    v = 0
+                    d2 = d[0]      # byte 2 of the unfiltered report
+                    d3 = d[1]      # byte 3 of the unfiltered report
+                    d4 = d[2]      # byte 4 of the unfiltered report
+                    if d2 == 0x01:
+                        v |= Y
+                    if d2 == 0x02:
+                        v |= X
+                    if d2 == 0x04:
+                        v |= B
+                    if d2 == 0x08:
+                        v |= A
+                    if d2 & 0x40:
+                        v |= R
+                    if d3 & 0x01:
+                        v |= SELECT
+                    if d3 & 0x02:
+                        v |= START
+                    if d4 & 0x01:
+                        v |= DOWN
+                    if d4 & 0x02:
+                        v |= UP
+                    if d4 & 0x04:
+                        v |= RIGHT
+                    if d4 & 0x08:
+                        v |= LEFT
+                    if d4 & 0x40:
+                        v |= L
+                    yield v
             # This filter trims off all the analog stuff (helps keep FPS up)
             filter_fn = lambda d: None if (d[0] != 0x30) else d[3:6]
-            return int0_gen(filter_fn=filter_fn)
+            return normalize_switchpro(int0_gen(filter_fn=filter_fn))
         elif dev_type == TYPE_ADAFRUIT_SNES:
             # Expected report format (SNES cluster layout, A on right)
             # byte 0: (analog dpad) 0x00=dPadL, 0x7f=dPadCenter, 0xff=dPadR
@@ -435,7 +471,44 @@ class InputDevice:
             # byte 6: (bitfield) 0x01=L, 0x02=R, 0x10=Select, 0x20=Start
             # byte 7: unused (0x00)
             #
-            return int0_gen(filter_fn=lambda d: d[:7])
+            # Generator function converts byte array to an XInput format uint16
+            # - data: an iterator that yields memoryview(bytearray(...))
+            def normalize_adasnes(data):
+                for d in data:
+                    if d is None:
+                        yield None
+                        continue
+                    v = 0
+                    d0 = d[0]
+                    d1 = d[1]
+                    d5 = d[5]
+                    d6 = d[6]
+                    if d0 == 0x00:
+                        v |= LEFT
+                    if d0 == 0xff:
+                        v |= RIGHT
+                    if d1 == 0x00:
+                        v |= UP
+                    if d1 == 0xff:
+                        v |= DOWN
+                    if d5 & 0x10:
+                        v |= X
+                    if d5 & 0x20:
+                        v |= A
+                    if d5 & 0x40:
+                        v |= B
+                    if d5 & 0x80:
+                        v |= Y
+                    if d6 & 0x01:
+                        v |= L
+                    if d6 & 0x02:
+                        v |= R
+                    if d6 & 0x10:
+                        v |= SELECT
+                    if d6 & 0x20:
+                        v |= START
+                    yield v
+            return normalize_adasnes(int0_gen(filter_fn=lambda d: d[:7]))
         elif dev_type == TYPE_8BITDO_ZERO2:
             # This device is quirky because it alternates between 8 byte and
             # 24 byte HID reports. The 24 byte reports seem to be three of the
@@ -450,7 +523,52 @@ class InputDevice:
             #         0x0f=dPadCenter
             # bytes 3+: whatever... don't care
             #
-            return int0_gen(filter_fn=lambda d: d[:3])
+            # Generator function converts byte array to an XInput format uint16
+            # - data: an iterator that yields memoryview(bytearray(...))
+            def normalize_zero2(data):
+                for d in data:
+                    if d is None:
+                        yield None
+                        continue
+                    v = 0
+                    d0 = d[0]      # byte 0 of the unfiltered report
+                    d1 = d[1]      # byte 1 of the unfiltered report
+                    d2 = d[2]      # byte 2 of the unfiltered report
+                    if d0 & 0x01:
+                        v |= A
+                    if d0 & 0x02:
+                        v |= B
+                    if d0 & 0x08:
+                        v |= X
+                    if d0 & 0x10:
+                        v |= Y
+                    if d0 & 0x40:
+                        v |= L
+                    if d0 & 0x80:
+                        v |= R
+                    if d1 & 0x04:
+                        v |= SELECT
+                    if d1 & 0x08:
+                        v |= START
+                    # Decode 4-bit BCD style Dpad
+                    if d2 == 0x00:        # N
+                        v |= UP
+                    elif d2 == 0x01:      # NE
+                        v |= UP | RIGHT
+                    elif d2 == 0x02:      # E
+                        v |= RIGHT
+                    elif d2 == 0x03:      # SE
+                        v |= DOWN | RIGHT
+                    elif d2 == 0x04:      # S
+                        v |= DOWN
+                    elif d2 == 0x05:      # SW
+                        v |= DOWN | LEFT
+                    elif d2 == 0x06:      # W
+                        v |= LEFT
+                    elif d2 == 0x07:      # NW
+                        v |= UP | LEFT
+                    yield v
+            return normalize_zero2(int0_gen(filter_fn=lambda d: d[:3]))
         elif dev_type == TYPE_XINPUT:
             # Expected report format (clone w/ SNES cluster layout, A on right):
             #  bytes 0,1:    prefix that doesn't change
@@ -464,7 +582,13 @@ class InputDevice:
             #  bytes 14..19: ???, but they don't change
             #
             # This filter trims off all the analog stuff (helps keep FPS up)
-            return int0_gen(filter_fn=lambda d: d[2:4])
+            filter_fn = lambda data: data[2:4]
+            # Generator function converts byte array to an XInput format uint16
+            # - data: an iterator that yields memoryview(bytearray(...))
+            def normalize_xinput(data):
+                for d in data:
+                    yield None if d is None else unpack_from('<H', d, 0)[0]
+            return normalize_xinput(int0_gen(filter_fn=filter_fn))
         else:
             # For other test devices I've experimented with, the interesting
             # stuff mostly happens within the first 10 bytes. This filter

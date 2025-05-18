@@ -30,7 +30,7 @@ logger = logging.getLogger('code.py')
 logger.setLevel(logging.DEBUG)
 
 
-def update_GUI(scene, buttons, diff, status):
+def update_GUI(scene, buttons, diff):
     # Update TileGrid sprites to reflect changed state of gamepad buttons
     # Scene is 10 sprites wide by 5 sprites tall:
     #  Y
@@ -41,8 +41,6 @@ def update_GUI(scene, buttons, diff, status):
     #  4 . . . . . . . . . .
     #    0 1 2 3 4 5 6 7 8 9 X
     #
-    x, y = status.anchored_position
-    xy_changed = False
     if diff & A:
         scene[8, 2] = 15 if (buttons & A) else 17
     if diff & B:
@@ -56,48 +54,17 @@ def update_GUI(scene, buttons, diff, status):
     if diff & R:
         scene[8, 0] = 1 if (buttons & R) else 5
     if diff & UP:
-        if buttons & UP:
-            scene[2, 1] = 8
-            if buttons & B:
-                # B + UP: move status label up
-                y = max(0, y-2)
-                xy_changed = True
-        else:
-            scene[2, 1] = 12
+        scene[2, 1] = 8 if (buttons & UP) else 12
     if diff & DOWN:
-        if buttons & DOWN:
-            scene[2, 3] = 22
-            if buttons & B:
-                # B + DOWN: move status label down
-                y = min(120, y+2)
-                xy_changed = True
-        else:
-            scene[2, 3] = 26
+        scene[2, 3] = 22 if (buttons & DOWN) else 26
     if diff & LEFT:
-        if buttons & LEFT:
-            scene[1, 2] = 14
-            if buttons & B:
-                # B + LEFT: move status label left
-                x = max(0, x-2)
-                xy_changed = True
-        else:
-            scene[1, 2] = 18
+        scene[1, 2] = 14 if (buttons & LEFT) else 18
     if diff & RIGHT:
-        if buttons & RIGHT:
-            scene[3, 2] = 16
-            if buttons & B:
-                # B + RIGHT: move status label right
-                x = min(160, x+2)
-                xy_changed = True
-        else:
-            scene[3, 2] = 20
+        scene[3, 2] = 16 if (buttons & RIGHT) else 20
     if diff & SELECT:
         scene[4, 3] = 10 if (buttons & SELECT) else 24
     if diff & START:
         scene[5, 3] = 11 if (buttons & START) else 25
-    if xy_changed:
-        print(' x: %3d, y: %3d' % (x, y), end='')
-    status.anchored_position = x, y
 
 def main():
 
@@ -166,6 +133,9 @@ def main():
         if data is None:
             print()
             report.text = ''
+        elif isinstance(data, str):
+            print('\r%s' % data, end='')
+            report.text = data
         else:
             msg = ' '.join(['%02x' % b for b in data])
             print('\r%s' % msg, end='')
@@ -216,6 +186,12 @@ def main():
                 if data is None:
                     # This means request was throttled or USB read timed out
                     continue
+                elif isinstance(data, int):
+                    diff = prev ^ data
+                    prev = data
+                    update_GUI(scene, data, diff)
+                    set_report('%04x' % data)
+                    display.refresh()
                 else:
                     # Handle bytes from HID report
                     set_report(data)
