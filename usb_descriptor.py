@@ -13,28 +13,11 @@ from usb.core import USBError, USBTimeoutError
 
 import adafruit_logging as logging
 
-from hid_report import HIDReportDesc
-
 
 # Configure logging
 logger = logging.getLogger('usb_descriptor')
 logger.setLevel(logging.DEBUG)
 
-
-def test_hid_report_descriptor_parser():
-    # Call this if you want to test the HID report descriptor parser
-    # CAUTION: This import will use a lot of memory for strings and bytearrays
-    import test_data
-#     device = test_data.COMPACT_KEYBOARD
-#     device = test_data.CHEAP_MOUSE
-#     device = test_data.POWERA
-#     device = test_data.ULTIMATE_BT
-#     device = test_data.ZERO2
-    device = test_data.SN30PRO_BT_DINPUT
-#     device = test_data.SN30PRO_BT_SWITCH
-    hid_report_desc = device['interfaces'][0]['hidreport']
-    print()
-    print(HIDReportDesc(hid_report_desc, indent=0))
 
 def get_desc(device, desc_type, bmRequestType=0x80, wIndex=0, length=256):
     # Read USB descriptor of type specified by desc_type (index always 0).
@@ -190,18 +173,8 @@ class HIDDesc:
             base = 6 + (i * 3)
             bDescriptorType = d[base]
             wDescriptorLength = (d[base+2] << 8) | d[base+1]
-            data = bytearray(0)
-            # Fetch HID Report descriptor if it's not too huge. The other
-            # possibility for bDescriptorType is 0x23 (physical descriptor)
-            # which we can safely ignore.
-            if bDescriptorType == 0x22 and wDescriptorLength <= 512:
-                data = get_desc(device, bDescriptorType, bmRequestType=0x81,
-                    wIndex=bInterfaceNumber, length=wDescriptorLength)
-            else:
-                logger.error(
-                    "Ignoring long HID descriptor: %d" % wDescriptorLength)
             sub_descriptors.append(
-                HIDSubDesc(bDescriptorType, wDescriptorLength, data))
+                HIDSubDesc(bDescriptorType, wDescriptorLength))
 
     def __str__(self):
         fmt = '    HID: bNumDescriptors: %d'
@@ -212,28 +185,13 @@ class HIDDesc:
 
 
 class HIDSubDesc:
-    def __init__(self, bDescriptorType, wDescriptorLength, data):
+    def __init__(self, bDescriptorType, wDescriptorLength):
         self.bDescriptorType = bDescriptorType
         self.wDescriptorLength = wDescriptorLength
-        self.data = data
-        # data is a bytearray that can be 0 length for an HID physical
-        # descriptor (bDescriptorType = 0x23) or when the configuration parser
-        # decides to skip a very long HID report descriptor (type 0x22).
-        if len(data) == 0:
-            self.hid_report_desc = None
-        else:
-            self.hid_report_desc = HIDReportDesc(data)
 
     def __str__(self):
-        fmt = """      bDescriptorType: 0x%02x, wDescriptorLength: %d
-      HID Report Descriptor Bytes:
-%s"""
-        chunks = [fmt % (
-            self.bDescriptorType,
-            self.wDescriptorLength,
-            dump_desc(self.data, indent=8))]
-        if self.hid_report_desc:
-            chunks.append(str(self.hid_report_desc))
+        fmt = "      bDescriptorType: 0x%02x, wDescriptorLength: %d"
+        chunks = [fmt % (self.bDescriptorType, self.wDescriptorLength)]
         return '\n'.join(chunks)
 
 

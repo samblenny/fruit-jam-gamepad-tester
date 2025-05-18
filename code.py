@@ -21,8 +21,7 @@ import adafruit_logging as logging
 
 from gamepad import (
     find_usb_device, InputDevice,
-    UP, DOWN, LEFT, RIGHT, START, SELECT, L, R, A, B, X, Y,
-    TYPE_SWITCH_PRO, TYPE_XINPUT, TYPE_HID_GAMEPAD)
+    UP, DOWN, LEFT, RIGHT, START, SELECT, L, R, A, B, X, Y)
 
 
 # Configure logging

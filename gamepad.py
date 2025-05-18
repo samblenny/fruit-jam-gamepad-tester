@@ -59,7 +59,7 @@ TYPE_8BITDO_ZERO2  = const(3)  # 2dc8:9018 mini SNES layout, HID over USB-C
 TYPE_XINPUT        = const(4)  # (vid:pid vary) Clones of Xbox360 controller
 TYPE_BOOT_MOUSE    = const(5)
 TYPE_BOOT_KEYBOARD = const(6)
-TYPE_HID_GAMEPAD   = const(7)
+TYPE_HID_COMPOSITE = const(7)
 TYPE_HID           = const(8)
 TYPE_OTHER         = const(9)
 
@@ -110,9 +110,9 @@ def find_usb_device(device_cache):
             elif is_xinput_gamepad(desc):
                 dev_type = TYPE_XINPUT
                 tag = 'XInput'
-            elif is_hid_gamepad(desc):
-                dev_type = TYPE_HID_GAMEPAD
-                tag = 'HIDGamepad'
+            elif is_hid_composite(desc):
+                dev_type = TYPE_HID_COMPOSITE
+                tag = 'HIDComposite'
             elif int0_info == (0x03, 0x01, 0x01):
                 dev_type = TYPE_BOOT_KEYBOARD
                 tag = 'BootKeyboard'
@@ -154,28 +154,15 @@ class ScanResult:
         self.int0_ins = int0_ins
 
 
-def is_hid_gamepad(descriptor):
-    # Return True if descriptor details match pattern for generic HID gamepad
+def is_hid_composite(descriptor):
+    # Return True if descriptor details look like a composite HID device.
     # - descriptor: usb_descriptor.Descriptor instance
     #
-    # This should generally work for PC style DInput gamepads and other types
-    # of vanilla HID gamepads, such as inexpensive (non-Pro) USB wired Switch
-    # controllers.
+    # This could be a gamepad. Or, might be another type of HID input device.
     #
-    # CAUTION! Button, dpad, stick, and trigger mappings for this type of
-    # gamepad are notoriously quirky. Control layout within the HID reports is
-    # up to the manufacturer. Some devices may send HID reports that do not
-    # match what's listed in their HID report descriptors.
     dev_info = descriptor.dev_class_subclass_protocol()
     int0_info = descriptor.int0_class_subclass_protocol()
-    if dev_info != (0x00, 0x00, 0x00):
-        return False
-    if int0_info == (0x03, 0x00, 0x00):
-        # This is a composite HID interface. Might be gamepad. Might not.
-        # TODO: actually look inside the HID descriptor for gamepad/joystick
-        logger.error('TODO: CHECK HID REPORT DESCRIPTOR. GAMEPAD?')
-        return True
-    return False
+    return dev_info == (0x00, 0x00, 0x00) and int0_info == (0x03, 0x00, 0x00)
 
 def is_xinput_gamepad(descriptor):
     # Return True if descriptor details match pattern for an XInput gamepad
@@ -263,31 +250,19 @@ class InputDevice:
         self.int0_endpoint_out = endpoint_out
         # Initialize USB device if needed (e.g. handshake or set gamepad LEDs)
         if dev_type == TYPE_SWITCH_PRO:
-            # Make sure interface 0 has endpoints for handshake and reading
-            if self.int0_endpoint_in is None or self.int0_endpoint_out is None:
-                raise ValueError("Interface 0 descriptor is missing endpoints")
             self.init_switch_pro_gamepad()
         elif dev_type == TYPE_ADAFRUIT_SNES:
             logger.info('Initializing Adafruit SNES-like gamepad')
         elif dev_type == TYPE_8BITDO_ZERO2:
             logger.info('Initializing 8BitDo Zero 2 gamepad')
         elif dev_type == TYPE_XINPUT:
-            # Make sure interface 0 has endpoints for handshake and reading
-            if self.int0_endpoint_in is None or self.int0_endpoint_out is None:
-                raise ValueError("Interface 0 descriptor is missing endpoints")
             self.init_xinput()
         elif dev_type == TYPE_BOOT_MOUSE:
-            # TODO: maybe implement something for this. maybe.
             logger.info('Initializing Boot-Compatible Mouse')
         elif dev_type == TYPE_BOOT_KEYBOARD:
-            # TODO: maybe implement something for this. maybe.
             logger.info('Initializing Boot-Compatible Keyboard')
-        elif dev_type == TYPE_HID_GAMEPAD:
-            # This covers PC style "DirectInput" or "DInput" along with other
-            # types of generic HID gamepads (e.g. non-Pro Switch controllers)
-            # Make sure interface 0 has endpoint for reading
-            if self.int0_endpoint_in is None:
-                raise ValueError("Interface 0 descriptor is missing endpoint")
+        elif dev_type == TYPE_HID_COMPOSITE:
+            logger.info('Initializing HID composite device')
         elif dev_type == TYPE_HID:
             logger.info('Initializing HID device')
         elif dev_type == TYPE_OTHER:
@@ -299,12 +274,6 @@ class InputDevice:
     def init_switch_pro_gamepad(self):
         # Prepare Switch Pro compatible gamepad for use.
         # Exceptions: may raise usb.core.USBError and usb.core.USBTimeoutError
-        #
-        # Control messages:
-        # - 0x80 0x01: get device type and mac address
-        # - 0x80 0x02: handshake
-        # - 0x80 0x03: use faster baud rate
-        # - 0x80 0x04: switch to USB HID mode with no timeout
         #
         logger.info('Initializing SwitchPro gamepad')
         # Output Stuff
@@ -385,19 +354,17 @@ class InputDevice:
     def input_event_generator(self):
         # This is a generator that makes an iterable for reading input events.
         # - returns: iterable that can be used with a for loop
-        # - yields: A memoryview(bytearray(...)) with filtered data from polling
-        #   the default endpoint. In case of a timeout or rate limit throttle,
-        #   the yield value is None.
+        # - yields: (3 possibilities)
+        #   1. Normalized 16-bit integer with XInput style button bitfield
+        #   2. A memoryview(bytearray(...)) with raw or filtered data from
+        #      polling the default endpoint.
+        #   3. None in the case of a timeout or rate limit throttle
         # Exceptions: may raise usb.core.USBError
         #
         # This allows calling code to use a for loop to read a stream of input
         # events from a USB device without having to worry about which backend
-        # driver is creating the events.
-        #
-        # Using this implementation strategy gives us a performance boost from
-        # avoiding a lot of heap allocations and dictionary lookups. If we were
-        # to use an idiomatic OOP thing here, with classes and polymorphism, it
-        # would make the Python VM do a lot more work.
+        # driver is creating the events. The point of using generators is to
+        # boost performance by avoiding heap allocations and dictionary lookups.
         #
         dev_type = self.dev_type  # cache this as we use it several times
         int0_gen = self.int0_read_generator  # cache to make shorter lines
@@ -405,11 +372,6 @@ class InputDevice:
             # caller is trying to poll when device is not connected
             return None
         elif dev_type == TYPE_SWITCH_PRO:
-            # This filter lambda returns None when report ID is not 0x30.
-            # For report ID 0x30, the filter trims off report ID, sequence
-            # number, and IMU data, leaving just the bytes for buttons, dpad,
-            # and sticks.
-            #
             # Expected report format (cluster layout: A on right)
             # byte     0: report ID
             # byte     1: sequence number
@@ -457,7 +419,10 @@ class InputDevice:
                     if d4 & 0x40:
                         v |= L
                     yield v
-            # This filter trims off all the analog stuff (helps keep FPS up)
+            # This filter lambda returns None when report ID is not 0x30.
+            # For report ID 0x30, the filter trims off report ID, sequence
+            # number, and IMU data, leaving just the bytes for buttons, dpad,
+            # and sticks.
             filter_fn = lambda d: None if (d[0] != 0x30) else d[3:6]
             return normalize_switchpro(int0_gen(filter_fn=filter_fn))
         elif dev_type == TYPE_ADAFRUIT_SNES:
@@ -589,13 +554,15 @@ class InputDevice:
                 for d in data:
                     yield None if d is None else unpack_from('<H', d, 0)[0]
             return normalize_xinput(int0_gen(filter_fn=filter_fn))
+        elif dev_type == TYPE_HID_COMPOSITE:
+            return int0_gen()
+        elif dev_type == TYPE_HID:
+            return int0_gen()
+        elif dev_type == TYPE_OTHER:
+            # Don't mess with unknown non-HID devices
+            return
         else:
-            # For other test devices I've experimented with, the interesting
-            # stuff mostly happens within the first 10 bytes. This filter
-            # slices off anything longer than that.
-            # TODO: Reconsider if this slice length is still appropriate
-            #
-            return int0_gen(filter_fn=lambda d: d[:10])
+            logger.error('UNEXPECTED VALUE FOR dev_type:' % dev_type)
 
     def int0_read_generator(self, filter_fn=lambda d: d):
         # Generator function: read from interface 0 and yield raw report data
