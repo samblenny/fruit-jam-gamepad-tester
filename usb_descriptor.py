@@ -28,7 +28,6 @@ def get_desc(device, desc_type, bmRequestType=0x80, wIndex=0, length=256):
     if not (18 <= length <= 512):
         raise ValueError("Bad descriptor length: %d" % length)
     data = bytearray(length)
-    # ctrl_transfer(bmRequestType, bRequest, wValue, wIndex, data, timeout)
     wValue = (desc_type << 8) | 0
     device.ctrl_transfer(bmRequestType, 6, wValue, wIndex, data, 300)
     return data
@@ -53,27 +52,6 @@ def split_desc(data):
         slices.append(data_mv[cursor:cursor+length])
         cursor += length
     return slices
-
-def dump_desc(data, message=None, indent=1):
-    # Hexdump a descriptor
-    # - data: bytearray or [bytes, ...] with descriptor from ctrl_transfer()
-    # - message: header message to print before the hexdump
-    # - indent: number of spaces to put at the start of each line
-    # - returns: hexdump string
-    arr = [message] if message else []
-    if isinstance(data, list):
-        for row in data:
-            arr.append((' ' * indent) + ' '.join(['%02x' % b for b in row]))
-    elif isinstance(data, bytearray):
-        # Wrap hexdump to fit in 80 columns
-        bytes_per_line = (80 - indent) // 3
-        data_mv = memoryview(data)  # use memoryview to reduce heap allocations
-        for offset in range(0, len(data_mv), bytes_per_line):
-            chunk = data_mv[offset:offset+bytes_per_line]
-            arr.append((' ' * indent) + ' '.join(['%02x' % b for b in chunk]))
-    else:
-        log.error("Unexpected dump_desc arg type %s" % type(data))
-    return "\n".join(arr)
 
 
 class ConfigDesc:
@@ -106,27 +84,20 @@ class InterfaceDesc:
         self.bInterfaceSubClass = d[6]
         self.bInterfaceProtocol = d[7]
         self.endpoint = []
-        self.hid = []
 
     def add_endpoint_descriptor(self, data):
         self.endpoint.append(EndpointDesc(data))
 
-    def add_hid_descriptor(self, data, device):
-        self.hid.append(HIDDesc(data, device, self.bInterfaceNumber))
-
     def __str__(self):
         fmt = ('  Interface %d: '
-            'Endpoints: %d, Class: 0x%02x, SubClass: 0x%02x, Protocol: 0x%02x')
+            '(Class, SubClass, Protocol): (0x%02x, 0x%02x, 0x%02x)')
         chunks = [fmt % (
             self.bInterfaceNumber,
-            self.bNumEndpoints,
             self.bInterfaceClass,
             self.bInterfaceSubClass,
             self.bInterfaceProtocol)]
         for e in self.endpoint:
             chunks.append(str(e))
-        for h in self.hid:
-            chunks.append(str(h))
         return '\n'.join(chunks)
 
 
@@ -143,56 +114,11 @@ class EndpointDesc:
         self.bInterval          = d[6]
 
     def __str__(self):
-        fmt = ('    Endpoint 0x%02x: '
-            'bmAttributes: 0x%02x, wMaxPacketSize: %d, bInterval: %d ms')
+        fmt = ('    Endpoint 0x%02x: wMaxPacketSize: %d, bInterval: %d ms')
         return fmt % (
             self.bEndpointAddress,
-            self.bmAttributes,
             self.wMaxPacketSize,
             self.bInterval)
-
-
-class HIDDesc:
-    def __init__(self, d, device, bInterfaceNumber):
-        # Parse an HID descriptor
-        # - d: bytearray containing an HID descriptor (9 or more bytes)
-        # - bInterfaceNumber: number of parent interface
-        if (len(d) < 9) or (d[0] < 9) or (d[1] != 0x21):
-            raise ValueError("Bad HID descriptor")
-        bLength         = d[0]
-        bNumDescriptors = d[5]
-        # Parse list of bDescriptorType + wDescriptorLength pairs with length
-        # determined by value of bNumDescriptors
-        if 6 + (bNumDescriptors * 3) != bLength:
-            raise ValueError("Bad HID descriptor (bNumDescriptors)")
-        sub_descriptors = []
-        self.bLength         = bLength
-        self.bNumDescriptors = bNumDescriptors
-        self.sub_descriptors = sub_descriptors
-        for i in range(bNumDescriptors):
-            base = 6 + (i * 3)
-            bDescriptorType = d[base]
-            wDescriptorLength = (d[base+2] << 8) | d[base+1]
-            sub_descriptors.append(
-                HIDSubDesc(bDescriptorType, wDescriptorLength))
-
-    def __str__(self):
-        fmt = '    HID: bNumDescriptors: %d'
-        chunks = [fmt % self.bNumDescriptors]
-        for subd in self.sub_descriptors:
-            chunks.append(str(subd))
-        return '\n'.join(chunks)
-
-
-class HIDSubDesc:
-    def __init__(self, bDescriptorType, wDescriptorLength):
-        self.bDescriptorType = bDescriptorType
-        self.wDescriptorLength = wDescriptorLength
-
-    def __str__(self):
-        fmt = "      bDescriptorType: 0x%02x, wDescriptorLength: %d"
-        chunks = [fmt % (self.bDescriptorType, self.wDescriptorLength)]
-        return '\n'.join(chunks)
 
 
 class Descriptor:
@@ -200,7 +126,7 @@ class Descriptor:
         # Read and parse USB device descriptor
         # - device: usb.core.Device
         #
-        # CAUTION: This does not read the configuration descriptor. You do that
+        # NOTE: This does not read the configuration descriptor. You do that
         # by calling read_configuration(). The point of splitting the work into
         # two functions is to let the calling code quickly check the device
         # descriptor before deciding to spend the time and memory on parsing
@@ -219,13 +145,8 @@ class Descriptor:
         self.bDeviceClass       = d[4]
         self.bDeviceSubClass    = d[5]
         self.bDeviceProtocol    = d[6]
-        self.bMaxPacketSize0    = d[7]
         self.idVendor           = (d[ 9] << 8) | d[ 8]
         self.idProduct          = (d[11] << 8) | d[10]
-        self.iManufacturer      = d[14]
-        self.iProduct           = d[15]
-        self.iSerialNumber      = d[16]
-        self.bNumConfigurations = d[17]
         # Make an empty placeholder configuration
         self.config_desc_list = []
         self.configs = []
@@ -294,7 +215,7 @@ class Descriptor:
                 elif tag == 0x0904:
                     # Interface
                     self.interfaces.append(InterfaceDesc(d))
-                    # Remember interface index for associating endpoint & HID
+                    # Remember interface index for associating endpoint
                     i += 1
                 elif tag == 0x0705:
                     # Endpoint
@@ -302,14 +223,8 @@ class Descriptor:
                         self.interfaces[i].add_endpoint_descriptor(d)
                     else:
                         raise ValueError("Found endpoint before interface")
-                elif self.bDeviceClass == 0x00 and bDescriptorType == 0x21:
-                    # HID
-                    if i >= 0:
-                        self.interfaces[i].add_hid_descriptor(d, device)
-                    else:
-                        raise ValueError("Found HID before interface")
             except ValueError as e:
-                logger.error(dump_desc(d, str(e)))
+                logger.error(e)
                 raise e
 
     def to_bytes(self):
@@ -317,35 +232,16 @@ class Descriptor:
 
     def __str__(self):
         fmt = """Descriptor:
-  Device Descriptor Bytes:
-%s
-  Config Descriptor Bytes:
-%s
+  idVendor:idProduct: %04x:%04x
   bcdUSB: 0x%04x
-  bDeviceClass: 0x%02x
-  bDeviceSubClass: 0x%02x
-  bDeviceProtocol: 0x%02x
-  bMaxPacketSize0: %d
-  idVendor: 0x%04x
-  idProduct: 0x%04x
-  iManufacturer: %d
-  iProduct: %d
-  iSerialNumber: %d
-  bNumConfigurations: %d"""
+  (bDeviceClass, bDeviceSubClass, bDeviceProtocol): (0x%02x, 0x%02x, 0x%02x)"""
         chunks = [fmt % (
-            dump_desc(self.device_desc_bytes, indent=4),
-            dump_desc(self.config_desc_list, indent=4),
+            self.idVendor,
+            self.idProduct,
             self.bcdUSB,
             self.bDeviceClass,
             self.bDeviceSubClass,
-            self.bDeviceProtocol,
-            self.bMaxPacketSize0,
-            self.idVendor,
-            self.idProduct,
-            self.iManufacturer,
-            self.iProduct,
-            self.iSerialNumber,
-            self.bNumConfigurations)]
+            self.bDeviceProtocol)]
         for lst in [self.configs, self.interfaces]:
             for item in lst:
                 chunks.append(str(item))

@@ -122,9 +122,10 @@ def main():
     button_1.pull = Pull.UP
 
     # Define status label updater with access to local vars from main()
-    def set_status(msg):
-        print(msg.replace('\n', ' '))
+    def set_status(msg, log_it=False):
         status.text = msg
+        if log_it:
+            logger.info(msg)
 
     # Define report label updater with access to local vars from main()
     # CAUTION: This prints with a CR ('\r') and end=''
@@ -198,7 +199,7 @@ def main():
             # Loop stops if somebody pressed button #1 asking for a re-scan
             set_report(None)
             logger.info("=== BUTTON 1 PRESSED ===")
-            set_status("Scanning USB bus...")
+            set_status("Scanning USB bus...", log_it=True)
             display.refresh()
             device_cache = {}
         except USBError as e:
@@ -206,15 +207,15 @@ def main():
             # unplugged. Can also be caused by other low-level USB stuff. Log
             # the error and stay in the loop to re-scan the USB bus.
             set_report(None)
-            logger.error("USBError: '%s', %s, '%s'" % (e, type(e), e.errno))
-            set_status("Scanning USB bus...")
+            logger.info("USBError: '%s' (device unplugged?)" % e)
+            set_status("Scanning USB bus...", log_it=True)
             display.refresh()
             device_cache = {}
         except ValueError as e:
             # This can happen if an initialization handshake glitches
             set_report(None)
             logger.error(e)
-            set_status("Scanning USB bus...")
+            set_status("Scanning USB bus...", log_it=True)
             display.refresh()
             device_cache = {}
 

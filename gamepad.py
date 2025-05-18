@@ -130,7 +130,7 @@ def find_usb_device(device_cache):
             pass
         except USBError as e:
             # USBError can happen when device first connects
-            logger.error("USBError: '%s'" % e)
+            logger.error("find_usb_device() USBError: '%s'" % e)
             pass
     return None
 
@@ -554,15 +554,20 @@ class InputDevice:
                 for d in data:
                     yield None if d is None else unpack_from('<H', d, 0)[0]
             return normalize_xinput(int0_gen(filter_fn=filter_fn))
+        elif dev_type == TYPE_BOOT_MOUSE:
+            return int0_gen()
+        elif dev_type == TYPE_BOOT_KEYBOARD:
+            return int0_gen()
         elif dev_type == TYPE_HID_COMPOSITE:
             return int0_gen()
         elif dev_type == TYPE_HID:
             return int0_gen()
         elif dev_type == TYPE_OTHER:
             # Don't mess with unknown non-HID devices
+            logger.info("Ignoring unknown device type")
             return
         else:
-            logger.error('UNEXPECTED VALUE FOR dev_type:' % dev_type)
+            logger.error('UNEXPECTED VALUE FOR dev_type: %d' % dev_type)
 
     def int0_read_generator(self, filter_fn=lambda d: d):
         # Generator function: read from interface 0 and yield raw report data
