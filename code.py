@@ -131,7 +131,6 @@ def main():
     # Define report label updater with access to local vars from main()
     def set_report(data):
         if data is None:
-            print()
             report.text = ''
         elif isinstance(data, str):
             print('\r%s' % data, end='')  # NOTE: this uses '\r...', end=''!
@@ -142,8 +141,13 @@ def main():
             report.text = msg
         display.refresh()
 
-    set_status("Scanning USB bus...", log_it=True)
+    show_scan_msg = True
     while True:
+        if show_scan_msg:
+            print()
+            set_status("Scanning USB bus...", log_it=True)
+            set_report(None)
+            show_scan_msg = False
         gc.collect()
         device_cache = {}
         try:
@@ -167,7 +171,6 @@ def main():
             prev = 0
             for data in dev.input_event_generator():
                 if not button_1.value:            # Fruit Jam Button #1 pressed
-                    logger.info("== BUTTON 1 ==")
                     break
                 if data is None:                  # Rate limit or USB timedout
                     continue
@@ -178,19 +181,17 @@ def main():
                     set_report('%04x' % data)
                 else:                             # Raw HID report bytes
                     set_report(data)
-            set_status("Scanning USB bus...", log_it=True)
-            set_report(None)
+            show_scan_msg = True
         except USBError as e:
-            # This often happens when low-speed devices are unplugged
+            # This sometimes happens when devices are unplugged. Not always.
+            print()
             logger.info("USBError: '%s' (device unplugged?)" % e)
-            set_status("Scanning USB bus...", log_it=True)
-            set_report(None)
+            show_scan_msg = True
         except ValueError as e:
             # This can happen if an initialization handshake glitches
+            print()
             logger.error(e)
-            set_status("Scanning USB bus...", log_it=True)
-            set_report(None)
-
+            show_scan_msg = True
 
 
 main()
