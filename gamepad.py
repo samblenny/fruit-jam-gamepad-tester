@@ -385,9 +385,9 @@ class InputDevice:
     def input_event_generator(self):
         # This is a generator that makes an iterable for reading input events.
         # - returns: iterable that can be used with a for loop
-        # - yields: Either a memoryview(bytearray(...)) with whatever data came
-        #   back from polling the endpoint. In case of a timeout or rate limit
-        #   throttle, the yield value is None.
+        # - yields: A memoryview(bytearray(...)) with filtered data from poling
+        #   the default endpoint. In case of a timeout or rate limit throttle,
+        #   the yield value is None.
         # Exceptions: may raise usb.core.USBError
         #
         # This allows calling code to use a for loop to read a stream of input
