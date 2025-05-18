@@ -19,16 +19,16 @@ logger = logging.getLogger('usb_descriptor')
 logger.setLevel(logging.DEBUG)
 
 
-def get_desc(device, desc_type, bmRequestType=0x80, wIndex=0, length=256):
+def get_desc(device, desc_type, length=256):
     # Read USB descriptor of type specified by desc_type (index always 0).
     # - device: a usb.core.Device
     # - desc_type: uint8 value for the descriptor type field of wValue
-    # - wIndex: uint8 value for selecting interface to use
     # - returns: bytearray with results from ctrl_transfer()
-    if not (18 <= length <= 512):
-        raise ValueError("Bad descriptor length: %d" % length)
+    # Exceptions: may raise USBError or USBTimeoutError
     data = bytearray(length)
+    bmRequestType = 0x80
     wValue = (desc_type << 8) | 0
+    wIndex = 0
     device.ctrl_transfer(bmRequestType, 6, wValue, wIndex, data, 300)
     return data
 
@@ -65,11 +65,8 @@ class ConfigDesc:
         self.bMaxPower           = d[8]  # units are 2 mA
 
     def __str__(self):
-        fmt = '  Config %d: NumInterfaces: %d, MaxPower: %d mA'
-        return fmt % (
-            self.bConfigurationValue,
-            self.bNumInterfaces,
-            self.bMaxPower * 2)
+        return '  Config %d: NumInterfaces: %d, MaxPower: %d mA' % (
+            self.bConfigurationValue, self.bNumInterfaces, self.bMaxPower * 2)
 
 
 class InterfaceDesc:
@@ -107,15 +104,12 @@ class EndpointDesc:
         # - d: bytearray containing a 7 byte endpoint descriptor
         if len(d) != 7 or d[0] != 0x07 or d[1] != 0x05:
             raise ValueError("Bad endpoint descriptor")
-        self.bEndpointAddress   = d[2]
-        # bmAttributes low 2 bits: 0:control, 1:iso., 2:bulk, 3:interrupt
-        self.bmAttributes       = d[3]
-        self.wMaxPacketSize     = (d[5] << 8) | d[4]
-        self.bInterval          = d[6]
+        self.bEndpointAddress = d[2]
+        self.wMaxPacketSize   = (d[5] << 8) | d[4]
+        self.bInterval        = d[6]
 
     def __str__(self):
-        fmt = ('    Endpoint 0x%02x: wMaxPacketSize: %d, bInterval: %d ms')
-        return fmt % (
+        return '    Endpoint 0x%02x: wMaxPacketSize: %d, bInterval: %d ms' % (
             self.bEndpointAddress,
             self.wMaxPacketSize,
             self.bInterval)
@@ -126,42 +120,32 @@ class Descriptor:
         # Read and parse USB device descriptor
         # - device: usb.core.Device
         #
-        # NOTE: This does not read the configuration descriptor. You do that
-        # by calling read_configuration(). The point of splitting the work into
-        # two functions is to let the calling code quickly check the device
-        # descriptor before deciding to spend the time and memory on parsing
-        # the whole configuration.
-        #
         device_desc = get_desc(device, 0x01, length=18)
         length = device_desc[0]
-        if length == 0:
-            raise ValueError("Empty Device Descriptor")
-        elif length != 18:
+        if length != 18:
             raise ValueError('Bad Device Descriptor Length: %d' % length)
-        # Parse device descriptor (should be 18 bytes long)
         d = device_desc
         self.device_desc_bytes = d
-        self.bcdUSB             = (d[ 3] << 8) | d[ 2]
-        self.bDeviceClass       = d[4]
-        self.bDeviceSubClass    = d[5]
-        self.bDeviceProtocol    = d[6]
-        self.idVendor           = (d[ 9] << 8) | d[ 8]
-        self.idProduct          = (d[11] << 8) | d[10]
+        self.bcdUSB          = (d[ 3] << 8) | d[ 2]
+        self.bDeviceClass    = d[4]
+        self.bDeviceSubClass = d[5]
+        self.bDeviceProtocol = d[6]
+        self.idVendor        = (d[ 9] << 8) | d[ 8]
+        self.idProduct       = (d[11] << 8) | d[10]
         # Make an empty placeholder configuration
         self.config_desc_list = []
         self.configs = []
         self.interfaces = []
 
     def vid_pid(self):
-        # Return tuble with USB device vendor and product IDs
         return (self.idVendor, self.idProduct)
 
     def dev_class_subclass_protocol(self):
-        # Return class, subclass, and protocol from devic descriptor
+        # Get device descriptor;s class, subclass, and protocol
         return (self.bDeviceClass, self.bDeviceSubClass, self.bDeviceProtocol)
 
     def int0_class_subclass_protocol(self):
-        # Return class, subclass, and protocol for interface 0
+        # Get Interface 0 descriptor's class, subclass, and protocol
         for i in self.interfaces:
             if i.bInterfaceNumber == 0:
                 return (
@@ -171,7 +155,7 @@ class Descriptor:
         return (None, None, None)
 
     def int0_output_endpoints(self):
-        # Return list of output endpoints for interface 0
+        # Get list of output endpoints for interface 0
         arr = []
         input_mask = 0x80
         for i in self.interfaces:
@@ -182,7 +166,7 @@ class Descriptor:
         return arr
 
     def int0_input_endpoints(self):
-        # Return list of input endpoints for interface 0
+        # Get list of input endpoints for interface 0
         arr = []
         input_mask = 0x80
         for i in self.interfaces:
@@ -201,31 +185,23 @@ class Descriptor:
         self.config_desc_list = config_desc_list
         self.configs    = []
         self.interfaces = []
-        i = -1
+        interface_num = -1
         for d in config_desc_list:
             if len(d) < 2:
                 continue
             bLength = d[0]
             bDescriptorType = d[1]
             tag = (bLength << 8) | bDescriptorType
-            try:
-                if tag == 0x0902:
-                    # Configuration
-                    self.configs.append(ConfigDesc(d))
-                elif tag == 0x0904:
-                    # Interface
-                    self.interfaces.append(InterfaceDesc(d))
-                    # Remember interface index for associating endpoint
-                    i += 1
-                elif tag == 0x0705:
-                    # Endpoint
-                    if i >= 0:
-                        self.interfaces[i].add_endpoint_descriptor(d)
-                    else:
-                        raise ValueError("Found endpoint before interface")
-            except ValueError as e:
-                logger.error(e)
-                raise e
+            if tag == 0x0902:
+                self.configs.append(ConfigDesc(d))
+            elif tag == 0x0904:
+                self.interfaces.append(InterfaceDesc(d))
+                interface_num += 1
+            elif tag == 0x0705:
+                if interface_num >= 0:
+                    self.interfaces[interface_num].add_endpoint_descriptor(d)
+                else:
+                    raise ValueError("Found endpoint before interface")
 
     def to_bytes(self):
         return self.device_desc_bytes
