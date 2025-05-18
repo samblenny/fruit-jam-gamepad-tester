@@ -5,8 +5,6 @@
 #
 # Related Documentation:
 # - https://docs.circuitpython.org/en/latest/shared-bindings/usb/core/index.html
-# - https://docs.circuitpython.org/projects/logging/en/latest/api.html
-# - https://learn.adafruit.com/a-logger-for-circuitpython/overview
 #
 from usb import core
 from usb.core import USBError, USBTimeoutError
