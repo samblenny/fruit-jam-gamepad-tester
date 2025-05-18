@@ -124,46 +124,35 @@ def main():
     # Define status label updater with access to local vars from main()
     def set_status(msg, log_it=False):
         status.text = msg
+        display.refresh()
         if log_it:
             logger.info(msg)
 
     # Define report label updater with access to local vars from main()
-    # CAUTION: This prints with a CR ('\r') and end=''
     def set_report(data):
         if data is None:
             print()
             report.text = ''
         elif isinstance(data, str):
-            print('\r%s' % data, end='')
+            print('\r%s' % data, end='')  # NOTE: this uses '\r...', end=''!
             report.text = data
         else:
             msg = ' '.join(['%02x' % b for b in data])
-            print('\r%s' % msg, end='')
+            print('\r%s' % msg, end='')   # NOTE: this uses '\r...', end=''!
             report.text = msg
+        display.refresh()
 
-    # MAIN EVENT LOOP
-    # Establish and maintain a gamepad connection
-    set_status("Scanning USB bus...")
-    display.refresh()
-    device_cache = {}
+    set_status("Scanning USB bus...", log_it=True)
     while True:
         gc.collect()
-        sleep(0.1)
-        need_LF = False
+        device_cache = {}
         try:
-            # The point of device_cache is to avoid repeatedly checking the
-            # same non-gamepad device once it's been identified as something
-            # other than a gamepad.
             scan_result = find_usb_device(device_cache)
             if scan_result is None:
                 # No connection yet, so sleep briefly then try the find again
                 sleep(0.4)
                 continue
             # Found an input device, so try to configure it and start polling
-            #
-            # CAUTION! Allowing a display refresh between the calls to
-            # usb.core.find() and usb.core.Device.set_configuration() may
-            # cause unpredictable behavior.
             dev = InputDevice(scan_result)
             sr = scan_result
             set_status((
@@ -171,53 +160,37 @@ def main():
                 "dev  %02X:%02X:%02X\n"     # device class:subclass:protocol
                 "int0 %02X:%02X:%02X\n"     # interface 0 class:subclass:proto.
                 "(button 1: rescan bus)"
-                ) % (
-                    (sr.vid, sr.pid, sr.tag) + sr.dev_info + sr.int0_info
-                )
+                ) % ((sr.vid, sr.pid, sr.tag) + sr.dev_info + sr.int0_info)
             )
-            display.refresh()
 
             # Poll for input events until Button #1 pressed or USB error
-            prev = 0         # previous input event state
+            prev = 0
             for data in dev.input_event_generator():
-                if not button_1.value:
-                    # End polling if Fruit Jam board's Button #1 was pressed
+                if not button_1.value:            # Fruit Jam Button #1 pressed
+                    logger.info("== BUTTON 1 ==")
                     break
-                if data is None:
-                    # This means request was throttled or USB read timed out
+                if data is None:                  # Rate limit or USB timedout
                     continue
-                elif isinstance(data, int):
+                elif isinstance(data, int):       # SNES-like uint16 bitfield
                     diff = prev ^ data
                     prev = data
                     update_GUI(scene, data, diff)
                     set_report('%04x' % data)
-                    display.refresh()
-                else:
-                    # Handle bytes from HID report
+                else:                             # Raw HID report bytes
                     set_report(data)
-                    display.refresh()
-            # Loop stops if somebody pressed button #1 asking for a re-scan
-            set_report(None)
-            logger.info("=== BUTTON 1 PRESSED ===")
             set_status("Scanning USB bus...", log_it=True)
-            display.refresh()
-            device_cache = {}
-        except USBError as e:
-            # This happens sometimes, but not always, when USB device is
-            # unplugged. Can also be caused by other low-level USB stuff. Log
-            # the error and stay in the loop to re-scan the USB bus.
             set_report(None)
+        except USBError as e:
+            # This often happens when low-speed devices are unplugged
             logger.info("USBError: '%s' (device unplugged?)" % e)
             set_status("Scanning USB bus...", log_it=True)
-            display.refresh()
-            device_cache = {}
+            set_report(None)
         except ValueError as e:
             # This can happen if an initialization handshake glitches
-            set_report(None)
             logger.error(e)
             set_status("Scanning USB bus...", log_it=True)
-            display.refresh()
-            device_cache = {}
+            set_report(None)
+
 
 
 main()
