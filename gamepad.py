@@ -502,7 +502,6 @@ class InputDevice:
         # Polling loop
         while True:
             poll_ms += next(poll_dt)
-            # Don't poll until we've
             if poll_ms < poll_target:
                 yield None  # It's too soon to poll now
                 continue
