@@ -3,9 +3,8 @@
 #
 # Gamepad driver for various USB wired gamepads.
 #
-# NOTE: This code does a lot of IO very quickly (by CircuitPython standards),
-# so it uses performance boosting tricks to avoid bogging down the CPU or
-# making a lot of heap allocations. To learn more about caching function
+# NOTE: This code uses performance boosting tricks to avoid bogging down the
+# CPU or making a lot of heap allocations. To learn more about caching function
 # references, caching instance variables, and making iterators with generator
 # functions, check out the links below.
 #
