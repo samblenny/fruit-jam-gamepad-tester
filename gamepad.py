@@ -59,6 +59,7 @@ TYPE_BOOT_MOUSE    = const(5)
 TYPE_BOOT_KEYBOARD = const(6)
 TYPE_HID_COMPOSITE = const(7)
 TYPE_HID           = const(8)
+TYPE_POWERA_WIRED  = const(9)  # 20d6:a711 PowerA Wired Controller (for Switch)
 
 
 def find_usb_device(device_cache):
@@ -93,6 +94,9 @@ def find_usb_device(device_cache):
             elif (vid, pid) == (0x2dc8, 0x9018):
                 # This one is HID but quirky, so it needs special handling
                 return ScanResult(dev, TYPE_8BITDO_ZERO2, '8BitDoZero2', desc)
+            elif (vid, pid) == (0x20d6, 0xa711):
+                # This is for Switch, but it's HID, with 8-bits per axis analog
+                return ScanResult(dev, TYPE_POWERA_WIRED, 'PowerAWired', desc)
             elif dev_int0_info == (0xff, 0xff, 0xff, 0xff, 0x5d, 0x01):
                 return ScanResult(dev, TYPE_XINPUT, 'XInput', desc)
             elif dev_int0_info == (0x00, 0x00, 0x00, 0x03, 0x00, 0x00):
@@ -175,6 +179,8 @@ class InputDevice:
             logger.info('Initializing Adafruit SNES-like gamepad')
         elif dev_type == TYPE_8BITDO_ZERO2:
             logger.info('Initializing 8BitDo Zero 2 gamepad')
+        elif dev_type == TYPE_POWERA_WIRED:
+            logger.info('Initializing PowerA Wired Controller')
         elif dev_type == TYPE_XINPUT:
             self.init_xinput()
         elif dev_type == TYPE_BOOT_MOUSE:
@@ -275,7 +281,7 @@ class InputDevice:
         if self.device is None:
             return None
         elif dev_type == TYPE_SWITCH_PRO:
-            # Expected report format (cluster layout: A on right)
+            # Report format (cluster layout: A on right)
             # byte 0: report ID
             # byte 1: sequence number
             # byte 2: 0x01=Y, 0x02=X, 0x04=B, 0x08=A, 0x40=R, 0x80=R2
@@ -326,7 +332,7 @@ class InputDevice:
             filter_fn = lambda d: None if (d[0] != 0x30) else d[3:6]
             return normalize_switchpro(int0_gen(filter_fn=filter_fn))
         elif dev_type == TYPE_ADAFRUIT_SNES:
-            # Expected report format (SNES cluster layout, A on right)
+            # Report format (SNES cluster layout, A on right)
             # byte 0: (analog dpad) 0x00=dPadL, 0x7f=dPadCenter, 0xff=dPadR
             # byte 1: (analog dpad) 0x00=dPadUp, 0x7f=dPadCenter, 0xff=dPadDn
             # ...
@@ -374,7 +380,7 @@ class InputDevice:
             # 24 byte HID reports. The 24 byte reports seem to be three of the
             # 8 byte reports stuck together.
             #
-            # Expected report format (dpad is 4-bit BCD style):
+            # Report format (dpad is 4-bit BCD style):
             # byte 0: 0x01=A, 0x02=B, 0x08=X, 0x10=Y, 0x40=L, 0x80=R
             # byte 1: 0x04=Select, 0x08=Start
             # byte 2: 0x00=dPadN, 0x01=dPadNE, 0x02=dPadE, 0x03=dPadSE,
@@ -425,6 +431,62 @@ class InputDevice:
                         v |= UP | LEFT
                     yield v
             return normalize_zero2(int0_gen(filter_fn=lambda d: d[:3]))
+        elif dev_type == TYPE_POWERA_WIRED:
+            # This device is a straightforward well-behaved HID gamepad with
+            # 4-bit BCD dpad and 8-bits per axis analog (which I'm ignoring).
+            #
+            # Report format (dpad is 4-bit BCD style, buttons are bitfield):
+            # byte 0: 0x01=Y, 0x02=B, 0x04=A, 0x08=X, 0x10=L, 0x20=R,
+            #         0x40=L1, 0x80=R2
+            # byte 1: 0x01=Select, 0x02=Start, 0x10=Home, 0x20=Screenshot
+            # byte 2: 0x00=dPadN, 0x01=dPadNE, 0x02=dPadE, 0x03=dPadSE,
+            #         0x04=dPadS, 0x05=dPadSW, 0x06=dPadW, 0x07=dPadNW,
+            #         0x0f=dPadCenter
+            #
+            def normalize_powera_wired(data):
+                for d in data:
+                    if d is None:
+                        yield None
+                        continue
+                    v = 0
+                    d0 = d[0]      # byte 0 of the unfiltered report
+                    d1 = d[1]      # byte 1 of the unfiltered report
+                    d2 = d[2]      # byte 2 of the unfiltered report
+                    if d0 & 0x01:
+                        v |= Y
+                    if d0 & 0x02:
+                        v |= B
+                    if d0 & 0x04:
+                        v |= A
+                    if d0 & 0x08:
+                        v |= X
+                    if d0 & 0x10:
+                        v |= L
+                    if d0 & 0x20:
+                        v |= R
+                    if d1 & 0x01:
+                        v |= SELECT
+                    if d1 & 0x02:
+                        v |= START
+                    # Decode 4-bit BCD style Dpad
+                    if d2 == 0x00:        # N
+                        v |= UP
+                    elif d2 == 0x01:      # NE
+                        v |= UP | RIGHT
+                    elif d2 == 0x02:      # E
+                        v |= RIGHT
+                    elif d2 == 0x03:      # SE
+                        v |= DOWN | RIGHT
+                    elif d2 == 0x04:      # S
+                        v |= DOWN
+                    elif d2 == 0x05:      # SW
+                        v |= DOWN | LEFT
+                    elif d2 == 0x06:      # W
+                        v |= LEFT
+                    elif d2 == 0x07:      # NW
+                        v |= UP | LEFT
+                    yield v
+            return normalize_powera_wired(int0_gen(filter_fn=lambda d: d[:3]))
         elif dev_type == TYPE_XINPUT:
             # Report format (clone w/ SNES cluster layout, A on right):
             # (NOTE: This is the canonical format that others get normalized to)
