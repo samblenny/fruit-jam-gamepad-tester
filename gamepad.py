@@ -125,37 +125,10 @@ class ScanResult:
         self.int0_info = descriptor.int0_class_subclass_protocol()
 
 
-def set_xinput_led(device, player):
-    # Set player number LEDs on XInput gamepad
-    # - device: usb.core.Device
-    # - player: player number in range 1..4
-    report = None
-    if player == 1:
-        report = bytearray(b'\x01\x03\x02')
-    elif player == 2:
-        report = bytearray(b'\x01\x03\x03')
-    elif player == 3:
-        report = bytearray(b'\x01\x03\x04')
-    elif player == 4:
-        report = bytearray(b'\x01\x03\x05')
-    else:
-        raise ValueError("Player number must be in range 1..4")
-    # write(endpoint, data, timeout)
-    device.write(0x02, report, 100)
-
 def elapsed_ms_generator():
-    # This can be used to measure time intervals efficiently.
+    # Generator function for measuring time intervals efficiently.
     # - returns: an iterator
     # - iterator yields: ms since last call to next(iterator)
-    #
-    # Technically speaking, this is a generator function that returns an
-    # iterator. The iterator is a generator. The generator yields a time
-    # interval in milliseconds each time next() is called on the iterator. The
-    # interval is the elapsed time between the current and previous iterations.
-    #
-    # This is intended to help throttle USB device access to avoid tying the
-    # CPU up with too much interrupt handling or irritating the USB device by
-    # polling it too frequently.
     #
     ms = ticks_ms      # caching function ref avoids dictionary lookups
     mask = 0x3fffffff  # (2**29)-1 because ticks_ms rolls over at 2**29
@@ -168,19 +141,16 @@ def elapsed_ms_generator():
 
 
 class InputDevice:
-    def __init__(self, scan_result, player=1):
+    def __init__(self, scan_result):
         # Initialize buffers used in polling USB gamepad events
         # - scan_result: a ScanResult instance
-        # - player: player number for setting gamepad LEDs (in range 1..4)
-        # Exceptions:
-        # - may raise usb.core.USBError
+        # Exceptions: may raise usb.core.USBError
         #
         device = scan_result.device
         dev_type = scan_result.dev_type
         self._prev = 0
         self.buf64 = bytearray(64)
         self.device = device
-        self.player = player
         self.dev_type = dev_type
         # Make sure CircuitPython core is not claiming the device
         interface = 0
@@ -223,17 +193,14 @@ class InputDevice:
         # Exceptions: may raise usb.core.USBError and usb.core.USBTimeoutError
         #
         logger.info('Initializing SwitchPro gamepad')
-        # Output Stuff
         out_addr = self.int0_endpoint_out.bEndpointAddress
-        out_interval = self.int0_endpoint_out.bInterval
-        # Input Stuff
         in_addr = self.int0_endpoint_in.bEndpointAddress
+        out_interval = self.int0_endpoint_out.bInterval
         in_interval = self.int0_endpoint_in.bInterval
         max_packet = min(64, self.int0_endpoint_in.wMaxPacketSize)
         data = bytearray(max_packet)
         data_mv = memoryview(data)
-
-        messages = (
+        handshake_messages = (
             bytes(b'\x80\x01'),  # get device type and mac address
             bytes(b'\x80\x02'),  # handshake
             bytes(b'\x80\x03'),  # set faster baud rate
@@ -246,49 +213,44 @@ class InputDevice:
             # set home LED
             bytes(b'\x01\x0b\x00\x00\x00\x00\x00\x00\x00\x00\x38\x01\x00\x00\x11\x11'),
         )
-        # Send handshake messages
         hexdump = binascii.hexlify  # cache hexdumper function
-        for msg in messages:
+        for msg in handshake_messages:
             try:
-                self.device.write(out_addr, msg, timeout=2*out_interval)
+                self.device.write(out_addr, msg, timeout=out_interval)
             except USBTimeoutError as e:
-                logger.error('SWITCH WRITE TIMEOUT %s' % hexdump(msg))
                 raise ValueError("SwitchPro HANDSHAKE GLITCH (wr)")
             # Wait for ACK
             okay = False
             for _ in range(8):
                 try:
-                    self.device.read(in_addr, data, timeout=2*in_interval)
+                    self.device.read(in_addr, data, timeout=in_interval)
                     logger.info('ACK %s' % hexdump(data_mv[:2]))
-                    # This just totally ignores the contents of gamepad's
-                    # response. In practice, just waiting for any response
-                    # seems to work?
                     okay = True
                     break
                 except USBTimeoutError:
                     pass
             if not okay:
-                # This happens pretty much every time with my 8BitDo Ultimate
-                # Bluetooth Controller's 2.4 GHz USB adapter. The handshake
-                # goes fine until I try to set the Home LED mode, but then it
-                # times out. I must be missing some subtle aspect of the
-                # handshake that isn't a problem for wired controllers. Result
-                # is that the adapter resets several times then switches to
-                # XInput mode with vid:pid 045e:028e. That works fine, so
-                # whatever. TODO: Maybe research why this is glitching?
+                # This happens with my 8BitDo Ultimate Bluetooth Controller's
+                # 2.4 GHz USB adapter. It glitches several times like this
+                # before re-appearing in XInput mode with vid:pid 045e:028e.
                 raise ValueError("SwitchPro HANDSHAKE GLITCH (rd)")
 
     def init_xinput(self):
         # Prepare XInput gamepad for use.
-        # Exceptions: may raise usb.core.USBError
+        # Exceptions: may raise USBError
         logger.info('Initializing XInput gamepad')
-        # Input Stuff
+        out_addr = self.int0_endpoint_out.bEndpointAddress
         in_addr = self.int0_endpoint_in.bEndpointAddress
+        out_inteval = self.int0_endpoint_out.bInterval
         in_interval = self.int0_endpoint_in.bInterval
         max_packet = min(64, self.int0_endpoint_in.wMaxPacketSize)
         data = bytearray(max_packet)
-        # LED
-        set_xinput_led(self.device, self.player)
+        # Set player number LEDs on XInput gamepad (hardcode to player 1)
+        msg = bytes(b'\x01\x03\x02')  # 1 LED
+        #msg = bytes(b'\x01\x03\x03')  # 2 LEDs
+        #msg = bytes(b'\x01\x03\x04')  # 3 LEDs
+        #msg = bytes(b'\x01\x03\x05')  # 4 LEDs
+        self.device.write(out_addr, msg, timeout=8)
         # Some XInput gamepads send a bunch of stuff initially before normal
         # reports begin, so drain the input pipe
         for _ in range(8):
@@ -306,29 +268,21 @@ class InputDevice:
         #   2. A memoryview(bytearray(...)) with raw or filtered data from
         #      polling the default endpoint.
         #   3. None in the case of a timeout or rate limit throttle
-        # Exceptions: may raise usb.core.USBError
-        #
-        # This allows calling code to use a for loop to read a stream of input
-        # events from a USB device without having to worry about which backend
-        # driver is creating the events. The point of using generators is to
-        # boost performance by avoiding heap allocations and dictionary lookups.
+        # Exceptions: may raise USBError
         #
         dev_type = self.dev_type  # cache this as we use it several times
         int0_gen = self.int0_read_generator  # cache to make shorter lines
         if self.device is None:
-            # caller is trying to poll when device is not connected
             return None
         elif dev_type == TYPE_SWITCH_PRO:
             # Expected report format (cluster layout: A on right)
-            # byte     0: report ID
-            # byte     1: sequence number
-            # byte     2: 0x01=Y, 0x02=X, 0x04=B, 0x08=A, 0x40=R, 0x80=R2
-            # byte     3: 0x01=Select, 0x02=Start, 0x04=R_stick_btn,
-            #             0x08=L_stick_btn, 0x10=Home=0x10, 0x20=Share
-            # byte     4: DpadDn=0x01, DpadUp=0x02, DpadR=0x04, DpadL=0x08,
-            #             0x40=L, 0x80=L2
-            # bytes  6-8: Left stick X and Y (maybe 12 bits each ???)
-            # bytes 9-11: Right stick X and Y (maybe 12 bits each ???)
+            # byte 0: report ID
+            # byte 1: sequence number
+            # byte 2: 0x01=Y, 0x02=X, 0x04=B, 0x08=A, 0x40=R, 0x80=R2
+            # byte 3: 0x01=Select, 0x02=Start, 0x04=R_stick_btn,
+            #         0x08=L_stick_btn, 0x10=Home=0x10, 0x20=Share
+            # byte 4: DpadDn=0x01, DpadUp=0x02, DpadR=0x04, DpadL=0x08,
+            #         0x40=L, 0x80=L2
             #
             # Generator function converts byte array to an XInput format uint16
             # - data: an iterator that yields memoryview(bytearray(...))
@@ -366,25 +320,19 @@ class InputDevice:
                     if d4 & 0x40:
                         v |= L
                     yield v
-            # This filter lambda returns None when report ID is not 0x30.
-            # For report ID 0x30, the filter trims off report ID, sequence
-            # number, and IMU data, leaving just the bytes for buttons, dpad,
-            # and sticks.
+            # This filter lambda returns None when report ID is not 0x30. For
+            # report ID 0x30, filter trims off report ID, sequence number, and
+            # IMU data, leaving bytes for buttons, dpad, and sticks.
             filter_fn = lambda d: None if (d[0] != 0x30) else d[3:6]
             return normalize_switchpro(int0_gen(filter_fn=filter_fn))
         elif dev_type == TYPE_ADAFRUIT_SNES:
             # Expected report format (SNES cluster layout, A on right)
             # byte 0: (analog dpad) 0x00=dPadL, 0x7f=dPadCenter, 0xff=dPadR
             # byte 1: (analog dpad) 0x00=dPadUp, 0x7f=dPadCenter, 0xff=dPadDn
-            # byte 2: unused (0x00)
-            # byte 3: unused (0x80)
-            # byte 4: unused (0x80)
+            # ...
             # byte 5: (bitfield) 0x10=X, 0x20=A, 0x40=B, 0x80=Y
             # byte 6: (bitfield) 0x01=L, 0x02=R, 0x10=Select, 0x20=Start
-            # byte 7: unused (0x00)
             #
-            # Generator function converts byte array to an XInput format uint16
-            # - data: an iterator that yields memoryview(bytearray(...))
             def normalize_adasnes(data):
                 for d in data:
                     if d is None:
@@ -424,19 +372,15 @@ class InputDevice:
         elif dev_type == TYPE_8BITDO_ZERO2:
             # This device is quirky because it alternates between 8 byte and
             # 24 byte HID reports. The 24 byte reports seem to be three of the
-            # 8 byte reports stuck together. Also, the only interesting stuff
-            # happens in the first 3 bytes.
+            # 8 byte reports stuck together.
             #
-            # Expected report format (note dpad is 4-bit BCD style):
+            # Expected report format (dpad is 4-bit BCD style):
             # byte 0: 0x01=A, 0x02=B, 0x08=X, 0x10=Y, 0x40=L, 0x80=R
             # byte 1: 0x04=Select, 0x08=Start
             # byte 2: 0x00=dPadN, 0x01=dPadNE, 0x02=dPadE, 0x03=dPadSE,
             #         0x04=dPadS, 0x05=dPadSW, 0x06=dPadW, 0x07=dPadNW,
             #         0x0f=dPadCenter
-            # bytes 3+: whatever... don't care
             #
-            # Generator function converts byte array to an XInput format uint16
-            # - data: an iterator that yields memoryview(bytearray(...))
             def normalize_zero2(data):
                 for d in data:
                     if d is None:
@@ -482,25 +426,18 @@ class InputDevice:
                     yield v
             return normalize_zero2(int0_gen(filter_fn=lambda d: d[:3]))
         elif dev_type == TYPE_XINPUT:
-            # Expected report format (clone w/ SNES cluster layout, A on right):
-            #  bytes 0,1:    prefix that doesn't change
-            #  bytes 2,3:    button bitfield for dpad, ABXY, etc (uint16)
-            #  byte  4:      L2 left trigger (analog uint8)
-            #  byte  5:      R2 right trigger (analog uint8)
-            #  bytes 6,7:    LX left stick X axis (int16)
-            #  bytes 8,9:    LY left stick Y axis (int16)
-            #  bytes 10,11:  RX right stick X axis (int16)
-            #  bytes 12,13:  RY right stick Y axis (int16)
-            #  bytes 14..19: ???, but they don't change
+            # Report format (clone w/ SNES cluster layout, A on right):
+            # (NOTE: This is the canonical format that others get normalized to)
+            #  ...
+            #  byte 2: 0x01=dPadUp, 0x02=dPadDn, 0x04=dPadL, 0x08=dPadR,
+            #          0x10=Start, 0x20=Select
+            #  byte 3: 0x01=L, 0x02=R, 0x10=B, 0x20=A, 0x05=Home, 0x40=Y, 0x80=X
             #
-            # This filter trims off all the analog stuff (helps keep FPS up)
-            filter_fn = lambda data: data[2:4]
-            # Generator function converts byte array to an XInput format uint16
-            # - data: an iterator that yields memoryview(bytearray(...))
             def normalize_xinput(data):
                 for d in data:
-                    yield None if d is None else unpack_from('<H', d, 0)[0]
-            return normalize_xinput(int0_gen(filter_fn=filter_fn))
+                    yield None if d is None else ((d[1] << 8) | d[0])
+            # Filter lambda trims off all the analog stuff
+            return normalize_xinput(int0_gen(filter_fn=lambda d: d[2:4]))
         elif dev_type == TYPE_BOOT_MOUSE:
             return int0_gen()
         elif dev_type == TYPE_BOOT_KEYBOARD:
@@ -518,29 +455,22 @@ class InputDevice:
 
     def int0_read_generator(self, filter_fn=lambda d: d):
         # Generator function: read from interface 0 and yield raw report data
-        # - filter_fn: Optional lambda function to modify raw reports. For
-        #   example, this can slice off the incrementing sequence number
-        #   included in SwitchPro reports (helping to detect input changes).
+        # - filter_fn: Optional lambda function to modify raw reports. This is
+        #   for slicing off sequence numbers, analog values, or junk bytes.
         # - yields: memoryview of bytes
-        # Exceptions: may raise core.usb.USBError
+        # Exceptions: may raise USBError
         #
-        # CAUTION: Polling frequency affects system stability. Poll too fast,
-        # and CircuitPython seems more likely to crash. Too slow, and some USB
-        # devices may reset.
+        # Meaning of bInterval depends on negotiated speed:
+        # - USB 2.0 spec: 5.6.4 Isochronous Transfer Bus Access Constraints
+        # - USB 2.0 spec: 9.6.6 Endpoint (table 9-13)
+        # - Low-speed: max time between polling requests = bInterval * 1 ms
+        # - Full-speed: max time = bInterval * 1 ms
+        # - High-speed: max time = math.pow(2, bInterval-1) * 125 µs
         #
-        # CAUTION: The meaning of bInterval is tricky and it depends on on the
-        # the actual negotiated speed. For details, see USB 2.0 spec:
-        #  - 5.6.4 Isochronous Transfer Bus Access Constraints
-        #  - 9.6.6 Endpoint (table 9-13. Standard Endpoint Descriptor)
-        # Meaning of bInterval based on connection speed (`^` here means
-        # "raised to the power of"):
-        #  - Low-speed: max time between polling requests = bInterval * 1 ms
-        #  - Full-speed: max time = bInterval * 1 ms
-        #  - High-speed: max time = 2^(bInterval-1) * 125 µs
-
-        # Input Endpoint Stuff
-        # This uses two data buffers so it's possible to compare the previous
-        # report value with the most recent report value.
+        # This implementation alternates between two data buffers so it's
+        # possible to compare the previous report with the current report
+        # without having to heap allocate a new buffer every time.
+        #
         in_addr = self.int0_endpoint_in.bEndpointAddress
         interval = self.int0_endpoint_in.bInterval
         if self.device.speed == SPEED_LOW:
@@ -567,19 +497,14 @@ class InputDevice:
         # 2. Waiting too long to read USB will upset some devices
         poll_ms = 0
         poll_dt = elapsed_ms_generator()
+        poll_target = (interval * 3) >> 2  # 75% of the max polling interval
 
-        # Start polling loop
-        #
-        # NOTE: To understand what this does, you need to understand the Python
-        # concepts of generator functions, iterators, and generators. The point
-        # of this is to reduce memory pressure from lots of heap allocations
-        # and to reduce CPU time spent on dictionary lookups.
-        #
+        # Polling loop
         while True:
-            # Respect the USB device's polling interval
             poll_ms += next(poll_dt)
-            if poll_ms < interval:
-                yield None
+            # Don't poll until we've
+            if poll_ms < poll_target:
+                yield None  # It's too soon to poll now
                 continue
             else:
                 poll_ms = 0
