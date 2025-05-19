@@ -298,33 +298,21 @@ class InputDevice:
                         yield None
                         continue
                     v = 0
-                    d2 = d[0]      # byte 2 of the unfiltered report
-                    d3 = d[1]      # byte 3 of the unfiltered report
-                    d4 = d[2]      # byte 4 of the unfiltered report
-                    if d2 == 0x01:
-                        v |= Y
-                    if d2 == 0x02:
-                        v |= X
-                    if d2 == 0x04:
-                        v |= B
-                    if d2 == 0x08:
-                        v |= A
-                    if d2 & 0x40:
-                        v |= R
-                    if d3 & 0x01:
-                        v |= SELECT
-                    if d3 & 0x02:
-                        v |= START
-                    if d4 & 0x01:
-                        v |= DOWN
-                    if d4 & 0x02:
-                        v |= UP
-                    if d4 & 0x04:
-                        v |= RIGHT
-                    if d4 & 0x08:
-                        v |= LEFT
-                    if d4 & 0x40:
-                        v |= L
+                    d2 = d[0]  # byte 2 of the unfiltered report
+                    d3 = d[1]  # byte 3 of the unfiltered report
+                    d4 = d[2]  # byte 4 of the unfiltered report
+                    v |= Y      if d2 & 0x01 else 0
+                    v |= X      if d2 & 0x02 else 0
+                    v |= B      if d2 & 0x04 else 0
+                    v |= A      if d2 & 0x08 else 0
+                    v |= R      if d2 & 0x40 else 0
+                    v |= SELECT if d3 & 0x01 else 0
+                    v |= START  if d3 & 0x02 else 0
+                    v |= DOWN   if d4 & 0x01 else 0
+                    v |= UP     if d4 & 0x02 else 0
+                    v |= RIGHT  if d4 & 0x04 else 0
+                    v |= LEFT   if d4 & 0x08 else 0
+                    v |= L      if d4 & 0x40 else 0
                     yield v
             # This filter lambda returns None when report ID is not 0x30. For
             # report ID 0x30, filter trims off report ID, sequence number, and
@@ -345,34 +333,24 @@ class InputDevice:
                         yield None
                         continue
                     v = 0
-                    d0 = d[0]
-                    d1 = d[1]
-                    d5 = d[5]
-                    d6 = d[6]
-                    if d0 == 0x00:
-                        v |= LEFT
-                    if d0 == 0xff:
-                        v |= RIGHT
-                    if d1 == 0x00:
-                        v |= UP
-                    if d1 == 0xff:
-                        v |= DOWN
-                    if d5 & 0x10:
-                        v |= X
-                    if d5 & 0x20:
-                        v |= A
-                    if d5 & 0x40:
-                        v |= B
-                    if d5 & 0x80:
-                        v |= Y
-                    if d6 & 0x01:
-                        v |= L
-                    if d6 & 0x02:
-                        v |= R
-                    if d6 & 0x10:
-                        v |= SELECT
-                    if d6 & 0x20:
-                        v |= START
+                    d0 = d[0]  # byte 0 of the unfiltered report
+                    d1 = d[1]  # byte 1 of the unfiltered report
+                    d5 = d[5]  # byte 5 of the unfiltered report
+                    d6 = d[6]  # byte 6 of the unfiltered report
+                    # Dpad uses 2 analog axes
+                    v |= LEFT   if d0 == 0x00 else 0
+                    v |= RIGHT  if d0 == 0xff else 0
+                    v |= UP     if d1 == 0x00 else 0
+                    v |= DOWN   if d1 == 0xff else 0
+                    # Buttons are bitfield
+                    v |= X      if d5 & 0x10 else 0
+                    v |= A      if d5 & 0x20 else 0
+                    v |= B      if d5 & 0x40 else 0
+                    v |= Y      if d5 & 0x80 else 0
+                    v |= L      if d6 & 0x01 else 0
+                    v |= R      if d6 & 0x02 else 0
+                    v |= SELECT if d6 & 0x10 else 0
+                    v |= START  if d6 & 0x20 else 0
                     yield v
             return normalize_adasnes(int0_gen(filter_fn=lambda d: d[:7]))
         elif dev_type == TYPE_8BITDO_ZERO2:
@@ -393,42 +371,27 @@ class InputDevice:
                         yield None
                         continue
                     v = 0
-                    d0 = d[0]      # byte 0 of the unfiltered report
-                    d1 = d[1]      # byte 1 of the unfiltered report
-                    d2 = d[2]      # byte 2 of the unfiltered report
-                    if d0 & 0x01:
-                        v |= A
-                    if d0 & 0x02:
-                        v |= B
-                    if d0 & 0x08:
-                        v |= X
-                    if d0 & 0x10:
-                        v |= Y
-                    if d0 & 0x40:
-                        v |= L
-                    if d0 & 0x80:
-                        v |= R
-                    if d1 & 0x04:
-                        v |= SELECT
-                    if d1 & 0x08:
-                        v |= START
-                    # Decode 4-bit BCD style Dpad
-                    if d2 == 0x00:        # N
-                        v |= UP
-                    elif d2 == 0x01:      # NE
-                        v |= UP | RIGHT
-                    elif d2 == 0x02:      # E
-                        v |= RIGHT
-                    elif d2 == 0x03:      # SE
-                        v |= DOWN | RIGHT
-                    elif d2 == 0x04:      # S
-                        v |= DOWN
-                    elif d2 == 0x05:      # SW
-                        v |= DOWN | LEFT
-                    elif d2 == 0x06:      # W
-                        v |= LEFT
-                    elif d2 == 0x07:      # NW
-                        v |= UP | LEFT
+                    d0 = d[0]  # byte 0 of the unfiltered report
+                    d1 = d[1]  # byte 1 of the unfiltered report
+                    d2 = d[2]  # byte 2 of the unfiltered report
+                    # Buttons are bitfield
+                    v |= A            if d0 & 0x01 else 0
+                    v |= B            if d0 & 0x02 else 0
+                    v |= X            if d0 & 0x08 else 0
+                    v |= Y            if d0 & 0x10 else 0
+                    v |= L            if d0 & 0x40 else 0
+                    v |= R            if d0 & 0x80 else 0
+                    v |= SELECT       if d1 & 0x04 else 0
+                    v |= START        if d1 & 0x08 else 0
+                    # Dpad is 4-bit BCD
+                    v |= UP           if d2 == 0x00 else 0
+                    v |= UP | RIGHT   if d2 == 0x01 else 0
+                    v |= RIGHT        if d2 == 0x02 else 0
+                    v |= DOWN | RIGHT if d2 == 0x03 else 0
+                    v |= DOWN         if d2 == 0x04 else 0
+                    v |= DOWN | LEFT  if d2 == 0x05 else 0
+                    v |= LEFT         if d2 == 0x06 else 0
+                    v |= UP | LEFT    if d2 == 0x07 else 0
                     yield v
             return normalize_zero2(int0_gen(filter_fn=lambda d: d[:3]))
         elif dev_type == TYPE_POWERA_WIRED:
@@ -449,42 +412,27 @@ class InputDevice:
                         yield None
                         continue
                     v = 0
-                    d0 = d[0]      # byte 0 of the unfiltered report
-                    d1 = d[1]      # byte 1 of the unfiltered report
-                    d2 = d[2]      # byte 2 of the unfiltered report
-                    if d0 & 0x01:
-                        v |= Y
-                    if d0 & 0x02:
-                        v |= B
-                    if d0 & 0x04:
-                        v |= A
-                    if d0 & 0x08:
-                        v |= X
-                    if d0 & 0x10:
-                        v |= L
-                    if d0 & 0x20:
-                        v |= R
-                    if d1 & 0x01:
-                        v |= SELECT
-                    if d1 & 0x02:
-                        v |= START
-                    # Decode 4-bit BCD style Dpad
-                    if d2 == 0x00:        # N
-                        v |= UP
-                    elif d2 == 0x01:      # NE
-                        v |= UP | RIGHT
-                    elif d2 == 0x02:      # E
-                        v |= RIGHT
-                    elif d2 == 0x03:      # SE
-                        v |= DOWN | RIGHT
-                    elif d2 == 0x04:      # S
-                        v |= DOWN
-                    elif d2 == 0x05:      # SW
-                        v |= DOWN | LEFT
-                    elif d2 == 0x06:      # W
-                        v |= LEFT
-                    elif d2 == 0x07:      # NW
-                        v |= UP | LEFT
+                    d0 = d[0]  # byte 0 of the unfiltered report
+                    d1 = d[1]  # byte 1 of the unfiltered report
+                    d2 = d[2]  # byte 2 of the unfiltered report
+                    # Buttons are bitfield
+                    v |= Y            if d0 & 0x01 else 0
+                    v |= B            if d0 & 0x02 else 0
+                    v |= A            if d0 & 0x04 else 0
+                    v |= X            if d0 & 0x08 else 0
+                    v |= L            if d0 & 0x10 else 0
+                    v |= R            if d0 & 0x20 else 0
+                    v |= SELECT       if d1 & 0x01 else 0
+                    v |= START        if d1 & 0x02 else 0
+                    # Dpad is 4-bit BCD
+                    v |= UP           if d2 == 0x00 else 0
+                    v |= UP | RIGHT   if d2 == 0x01 else 0
+                    v |= RIGHT        if d2 == 0x02 else 0
+                    v |= DOWN | RIGHT if d2 == 0x03 else 0
+                    v |= DOWN         if d2 == 0x04 else 0
+                    v |= DOWN | LEFT  if d2 == 0x05 else 0
+                    v |= LEFT         if d2 == 0x06 else 0
+                    v |= UP | LEFT    if d2 == 0x07 else 0
                     yield v
             return normalize_powera_wired(int0_gen(filter_fn=lambda d: d[:3]))
         elif dev_type == TYPE_XINPUT:
